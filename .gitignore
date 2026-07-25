@@ -1,4 +1,9 @@
 /target/
 /work/
-/outputs/
+/latest/*
+!/latest/README.md
+/archive/*
+!/archive/README.md
+/outputs/*
+!/outputs/README.md
 *.pdb

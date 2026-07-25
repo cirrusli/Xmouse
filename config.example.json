@@ -1,9 +1,11 @@
 {
   "schema_version": 1,
   "enabled": true,
+  "dark_mode": false,
   "trigger": "right",
   "activation_delay_ms": 180,
   "activation_distance_dip": 12.0,
+  "minimum_stroke_length_dip": 28.0,
   "recognition_threshold": 0.82,
   "show_trail": true,
   "search_url_template": "https://www.google.com/search?q={query}",

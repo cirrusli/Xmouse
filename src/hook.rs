@@ -70,7 +70,9 @@ struct Candidate {
     last: UiPoint,
     points: Vec<GesturePoint>,
     path_length: f32,
+    max_distance_px: f32,
     activation_distance_px: f32,
+    minimum_stroke_length_px: f32,
     active: bool,
     target_hwnd: isize,
     last_overlay_post: Instant,
@@ -208,6 +210,7 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
         }
         let dpi = unsafe { GetDpiForWindow(target) }.max(96);
         let activation_distance_px = config.activation_distance_dip * dpi as f32 / 96.0;
+        let minimum_stroke_length_px = config.minimum_stroke_length_dip * dpi as f32 / 96.0;
         let now = Instant::now();
         state.candidate = Some(Candidate {
             button: config.trigger,
@@ -222,7 +225,9 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
             },
             points: vec![GesturePoint::new(point.x as f32, point.y as f32)],
             path_length: 0.0,
+            max_distance_px: 0.0,
             activation_distance_px,
+            minimum_stroke_length_px,
             active: false,
             target_hwnd: target as isize,
             last_overlay_post: now,
@@ -235,6 +240,10 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
             let dx = event.pt.x - candidate.last.x;
             let dy = event.pt.y - candidate.last.y;
             let segment = ((dx * dx + dy * dy) as f32).sqrt();
+            let start_dx = event.pt.x - candidate.start.x;
+            let start_dy = event.pt.y - candidate.start.y;
+            let distance_from_start = ((start_dx * start_dx + start_dy * start_dy) as f32).sqrt();
+            candidate.max_distance_px = candidate.max_distance_px.max(distance_from_start);
             if segment >= 1.5 {
                 candidate.path_length += segment;
                 candidate.last = UiPoint {
@@ -249,7 +258,7 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
             }
             if !candidate.active
                 && candidate.started_at.elapsed().as_millis() >= config.activation_delay_ms as u128
-                && candidate.path_length >= candidate.activation_distance_px
+                && candidate.max_distance_px >= candidate.activation_distance_px
             {
                 candidate.active = true;
                 post_point(
@@ -274,7 +283,16 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
             state.candidate = Some(candidate);
             return unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) };
         }
-        if candidate.path_length < candidate.activation_distance_px {
+        let committed = gesture_committed(
+            candidate.path_length,
+            candidate.max_distance_px,
+            candidate.activation_distance_px,
+            candidate.minimum_stroke_length_px,
+        );
+        if !committed {
+            if candidate.active {
+                post_simple(context, WM_APP_OVERLAY_END);
+            }
             let _ = context
                 .command_sender
                 .send(HookCommand::Replay(candidate.button));
@@ -368,4 +386,29 @@ fn is_trigger_down(
 
 fn is_trigger_up(message: u32, event_button: Option<TriggerButton>) -> bool {
     matches!(message, WM_RBUTTONUP | WM_XBUTTONUP) && event_button.is_some()
+}
+
+fn gesture_committed(
+    path_length: f32,
+    max_distance: f32,
+    activation_distance: f32,
+    minimum_stroke_length: f32,
+) -> bool {
+    path_length >= minimum_stroke_length && max_distance >= activation_distance * 1.5
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gesture_committed;
+
+    #[test]
+    fn short_or_jittery_drag_is_not_committed() {
+        assert!(!gesture_committed(20.0, 18.0, 12.0, 28.0));
+        assert!(!gesture_committed(80.0, 8.0, 12.0, 28.0));
+    }
+
+    #[test]
+    fn deliberate_drag_is_committed() {
+        assert!(gesture_committed(40.0, 24.0, 12.0, 28.0));
+    }
 }

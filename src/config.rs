@@ -23,32 +23,6 @@ pub enum TriggerButton {
     X2,
 }
 
-impl TriggerButton {
-    pub fn display_name(self) -> &'static str {
-        match self {
-            Self::Right => "鼠标右键",
-            Self::X1 => "侧键 X1",
-            Self::X2 => "侧键 X2",
-        }
-    }
-
-    pub fn index(self) -> usize {
-        match self {
-            Self::Right => 0,
-            Self::X1 => 1,
-            Self::X2 => 2,
-        }
-    }
-
-    pub fn from_index(index: usize) -> Self {
-        match index {
-            1 => Self::X1,
-            2 => Self::X2,
-            _ => Self::Right,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HistoryConfig {
@@ -82,9 +56,11 @@ impl Default for HistoryConfig {
 pub struct AppConfig {
     pub schema_version: u32,
     pub enabled: bool,
+    pub dark_mode: bool,
     pub trigger: TriggerButton,
     pub activation_delay_ms: u32,
     pub activation_distance_dip: f32,
+    pub minimum_stroke_length_dip: f32,
     pub recognition_threshold: f32,
     pub show_trail: bool,
     pub search_url_template: String,
@@ -97,9 +73,11 @@ impl Default for AppConfig {
         Self {
             schema_version: 1,
             enabled: true,
+            dark_mode: false,
             trigger: TriggerButton::Right,
             activation_delay_ms: 180,
             activation_distance_dip: 12.0,
+            minimum_stroke_length_dip: 28.0,
             recognition_threshold: 0.82,
             show_trail: true,
             search_url_template: DEFAULT_SEARCH_URL.to_owned(),
@@ -119,6 +97,9 @@ impl AppConfig {
         }
         if !(4.0..=80.0).contains(&self.activation_distance_dip) {
             bail!("触发距离必须在 4–80 DIP 之间");
+        }
+        if !(12.0..=160.0).contains(&self.minimum_stroke_length_dip) {
+            bail!("最短手势轨迹必须在 12–160 DIP 之间");
         }
         if !(0.60..=0.98).contains(&self.recognition_threshold) {
             bail!("识别阈值必须在 0.60–0.98 之间");

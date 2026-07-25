@@ -3,6 +3,7 @@ use std::{env, path::PathBuf, process::Command};
 fn main() {
     println!("cargo:rerun-if-changed=assets/xmouse.rc");
     println!("cargo:rerun-if-changed=assets/xmouse.ico");
+    println!("cargo:rerun-if-changed=assets/xmouse.manifest");
 
     let target = env::var("TARGET").expect("TARGET is set by Cargo");
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo"));

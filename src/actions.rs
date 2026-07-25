@@ -55,10 +55,7 @@ pub fn run_worker(
             while let Ok(command) = receiver.recv() {
                 let result = match command {
                     HookCommand::Replay(button) => replay_button(button),
-                    HookCommand::Cancelled => {
-                        post_toast(ui_hwnd, "手势太快，已取消");
-                        Ok(())
-                    }
+                    HookCommand::Cancelled => Ok(()),
                     HookCommand::Stroke(stroke) => {
                         let threshold = config
                             .read()

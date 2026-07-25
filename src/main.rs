@@ -7,6 +7,7 @@ mod config;
 mod gesture;
 mod hook;
 mod logging;
+mod resources;
 mod storage;
 
 fn main() {

@@ -87,6 +87,13 @@ pub struct ClipItem {
     pub last_used_at: i64,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StorageStats {
+    pub item_count: u64,
+    pub content_bytes: u64,
+    pub disk_bytes: u64,
+}
+
 impl ClipItem {
     pub fn display_text(&self) -> String {
         match self.kind {
@@ -526,6 +533,30 @@ impl Storage {
         Ok(())
     }
 
+    pub fn stats(&self) -> Result<StorageStats> {
+        let connection = self.connect()?;
+        let (count, content_bytes): (i64, i64) = connection.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(byte_size), 0) FROM clips",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        drop(connection);
+
+        let mut disk_bytes = file_size(&self.database_path)
+            .saturating_add(file_size(&self.database_path.with_extension("db-wal")))
+            .saturating_add(file_size(&self.database_path.with_extension("db-shm")));
+        if let Ok(entries) = fs::read_dir(&self.media_dir) {
+            for entry in entries.flatten() {
+                disk_bytes = disk_bytes.saturating_add(file_size(&entry.path()));
+            }
+        }
+        Ok(StorageStats {
+            item_count: count.max(0) as u64,
+            content_bytes: content_bytes.max(0) as u64,
+            disk_bytes,
+        })
+    }
+
     fn evict_if_needed(&self) -> Result<()> {
         let config = self.config.read().expect("config poisoned").clone();
         let max_bytes = config.history.max_disk_mib * 1024 * 1024;
@@ -561,6 +592,12 @@ impl Storage {
         }
         Ok(())
     }
+}
+
+fn file_size(path: &std::path::Path) -> u64 {
+    fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
 }
 
 fn unix_millis() -> i64 {

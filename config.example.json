@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "enabled": true,
+  "trigger": "right",
+  "activation_delay_ms": 180,
+  "activation_distance_dip": 12.0,
+  "recognition_threshold": 0.82,
+  "show_trail": true,
+  "search_url_template": "https://www.google.com/search?q={query}",
+  "autostart": false,
+  "history": {
+    "capture": true,
+    "encrypt_content": false,
+    "max_items": 200,
+    "max_disk_mib": 256,
+    "max_text_bytes": 1048576,
+    "max_image_input_mib": 64,
+    "max_image_stored_mib": 20,
+    "excluded_processes": []
+  }
+}

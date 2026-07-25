@@ -1,0 +1,371 @@
+use crate::{
+    clipboard::process_name,
+    config::{AppConfig, TriggerButton},
+    gesture::Point as GesturePoint,
+};
+use anyhow::{Result, bail};
+use std::{
+    ptr,
+    sync::{
+        Arc, Mutex, OnceLock, RwLock,
+        atomic::{AtomicIsize, Ordering},
+        mpsc::{self, Sender},
+    },
+    thread,
+    time::Instant,
+};
+use windows_sys::Win32::{
+    Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM},
+    System::LibraryLoader::GetModuleHandleW,
+    UI::{
+        HiDpi::GetDpiForWindow,
+        Input::KeyboardAndMouse::{
+            INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+            MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
+        },
+        WindowsAndMessaging::{
+            CallNextHookEx, GA_ROOT, GetAncestor, GetMessageW, GetWindowThreadProcessId, MSG,
+            MSLLHOOKSTRUCT, PostMessageW, SetWindowsHookExW, UnhookWindowsHookEx, WH_MOUSE_LL,
+            WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
+            WindowFromPoint,
+        },
+    },
+};
+
+pub const WM_APP_OVERLAY_BEGIN: u32 = 0x8001;
+pub const WM_APP_OVERLAY_POINT: u32 = 0x8002;
+pub const WM_APP_OVERLAY_END: u32 = 0x8003;
+pub const WM_APP_SHOW_HISTORY: u32 = 0x8004;
+pub const WM_APP_TOAST: u32 = 0x8005;
+pub const WM_APP_TRAY: u32 = 0x8006;
+pub const WM_APP_CAPTURE_DONE: u32 = 0x8007;
+
+pub const INJECTED_EVENT_TOKEN: usize = 0x4743_4C49_505F_0001;
+const XBUTTON1_VALUE: u16 = 0x0001;
+const XBUTTON2_VALUE: u16 = 0x0002;
+
+#[derive(Debug)]
+pub struct StrokeRequest {
+    pub points: Vec<GesturePoint>,
+    pub target_hwnd: isize,
+}
+
+#[derive(Debug)]
+pub enum HookCommand {
+    Stroke(StrokeRequest),
+    Replay(TriggerButton),
+    Cancelled,
+}
+
+#[repr(C)]
+pub struct UiPoint {
+    pub x: i32,
+    pub y: i32,
+}
+
+struct Candidate {
+    button: TriggerButton,
+    started_at: Instant,
+    start: UiPoint,
+    last: UiPoint,
+    points: Vec<GesturePoint>,
+    path_length: f32,
+    activation_distance_px: f32,
+    active: bool,
+    target_hwnd: isize,
+    last_overlay_post: Instant,
+}
+
+#[derive(Default)]
+struct HookState {
+    candidate: Option<Candidate>,
+}
+
+struct HookContext {
+    state: Mutex<HookState>,
+    config: Arc<RwLock<AppConfig>>,
+    command_sender: Sender<HookCommand>,
+    ui_hwnd: AtomicIsize,
+}
+
+static CONTEXT: OnceLock<HookContext> = OnceLock::new();
+
+pub fn start(
+    config: Arc<RwLock<AppConfig>>,
+    command_sender: Sender<HookCommand>,
+    ui_hwnd: isize,
+) -> Result<()> {
+    CONTEXT
+        .set(HookContext {
+            state: Mutex::new(HookState::default()),
+            config,
+            command_sender,
+            ui_hwnd: AtomicIsize::new(ui_hwnd),
+        })
+        .map_err(|_| anyhow::anyhow!("鼠标钩子已启动"))?;
+
+    let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("xmouse-hook".to_owned())
+        .spawn(move || unsafe {
+            let module = GetModuleHandleW(ptr::null()) as HINSTANCE;
+            let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), module, 0);
+            let _ = ready_sender.send(!hook.is_null());
+            if hook.is_null() {
+                return;
+            }
+            let mut message = MSG::default();
+            while GetMessageW(&mut message, ptr::null_mut(), 0, 0) > 0 {}
+            UnhookWindowsHookEx(hook);
+        })?;
+
+    if ready_receiver.recv().unwrap_or(false) {
+        Ok(())
+    } else {
+        bail!("安装全局鼠标钩子失败")
+    }
+}
+
+pub fn update_ui_hwnd(hwnd: isize) {
+    if let Some(context) = CONTEXT.get() {
+        context.ui_hwnd.store(hwnd, Ordering::Release);
+    }
+}
+
+pub fn replay_button(button: TriggerButton) -> Result<()> {
+    let (down, up, mouse_data) = match button {
+        TriggerButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, 0),
+        TriggerButton::X1 => (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, XBUTTON1_VALUE as u32),
+        TriggerButton::X2 => (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, XBUTTON2_VALUE as u32),
+    };
+    let mut inputs = [
+        INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    mouseData: mouse_data,
+                    dwFlags: down,
+                    time: 0,
+                    dwExtraInfo: INJECTED_EVENT_TOKEN,
+                },
+            },
+        },
+        INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    mouseData: mouse_data,
+                    dwFlags: up,
+                    time: 0,
+                    dwExtraInfo: INJECTED_EVENT_TOKEN,
+                },
+            },
+        },
+    ];
+    let sent = unsafe {
+        SendInput(
+            inputs.len() as u32,
+            inputs.as_mut_ptr(),
+            std::mem::size_of::<INPUT>() as i32,
+        )
+    };
+    if sent == inputs.len() as u32 {
+        Ok(())
+    } else {
+        bail!("重放鼠标按键失败")
+    }
+}
+
+unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code < 0 {
+        return unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) };
+    }
+    let Some(context) = CONTEXT.get() else {
+        return unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) };
+    };
+    let event = unsafe { &*(lparam as *const MSLLHOOKSTRUCT) };
+    if event.dwExtraInfo == INJECTED_EVENT_TOKEN {
+        return unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) };
+    }
+
+    let config = context.config.read().expect("config poisoned").clone();
+    if !config.enabled {
+        return unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) };
+    }
+    let message = wparam as u32;
+    let event_button = trigger_for_event(message, event.mouseData);
+    let mut state = context.state.lock().expect("hook state poisoned");
+
+    if is_trigger_down(message, event_button, config.trigger) && state.candidate.is_none() {
+        let point = event.pt;
+        let target = target_window(point);
+        if target.is_null() || is_excluded(target, &config) {
+            return unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) };
+        }
+        let dpi = unsafe { GetDpiForWindow(target) }.max(96);
+        let activation_distance_px = config.activation_distance_dip * dpi as f32 / 96.0;
+        let now = Instant::now();
+        state.candidate = Some(Candidate {
+            button: config.trigger,
+            started_at: now,
+            start: UiPoint {
+                x: point.x,
+                y: point.y,
+            },
+            last: UiPoint {
+                x: point.x,
+                y: point.y,
+            },
+            points: vec![GesturePoint::new(point.x as f32, point.y as f32)],
+            path_length: 0.0,
+            activation_distance_px,
+            active: false,
+            target_hwnd: target as isize,
+            last_overlay_post: now,
+        });
+        return 1;
+    }
+
+    if message == WM_MOUSEMOVE {
+        if let Some(candidate) = state.candidate.as_mut() {
+            let dx = event.pt.x - candidate.last.x;
+            let dy = event.pt.y - candidate.last.y;
+            let segment = ((dx * dx + dy * dy) as f32).sqrt();
+            if segment >= 1.5 {
+                candidate.path_length += segment;
+                candidate.last = UiPoint {
+                    x: event.pt.x,
+                    y: event.pt.y,
+                };
+                if candidate.points.len() < 2_048 {
+                    candidate
+                        .points
+                        .push(GesturePoint::new(event.pt.x as f32, event.pt.y as f32));
+                }
+            }
+            if !candidate.active
+                && candidate.started_at.elapsed().as_millis() >= config.activation_delay_ms as u128
+                && candidate.path_length >= candidate.activation_distance_px
+            {
+                candidate.active = true;
+                post_point(
+                    context,
+                    WM_APP_OVERLAY_BEGIN,
+                    candidate.start.x,
+                    candidate.start.y,
+                );
+            }
+            if candidate.active && candidate.last_overlay_post.elapsed().as_millis() >= 12 {
+                candidate.last_overlay_post = Instant::now();
+                post_point(context, WM_APP_OVERLAY_POINT, event.pt.x, event.pt.y);
+            }
+        }
+        return unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) };
+    }
+
+    if is_trigger_up(message, event_button)
+        && let Some(candidate) = state.candidate.take()
+    {
+        if event_button != Some(candidate.button) {
+            state.candidate = Some(candidate);
+            return unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) };
+        }
+        if candidate.path_length < candidate.activation_distance_px {
+            let _ = context
+                .command_sender
+                .send(HookCommand::Replay(candidate.button));
+        } else if candidate.active {
+            post_simple(context, WM_APP_OVERLAY_END);
+            let _ = context
+                .command_sender
+                .send(HookCommand::Stroke(StrokeRequest {
+                    points: candidate.points,
+                    target_hwnd: candidate.target_hwnd,
+                }));
+        } else {
+            let _ = context.command_sender.send(HookCommand::Cancelled);
+        }
+        return 1;
+    }
+
+    unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) }
+}
+
+fn target_window(point: POINT) -> HWND {
+    let window = unsafe { WindowFromPoint(point) };
+    if window.is_null() {
+        return window;
+    }
+    let root = unsafe { GetAncestor(window, GA_ROOT) };
+    if root.is_null() { window } else { root }
+}
+
+fn is_excluded(hwnd: HWND, config: &AppConfig) -> bool {
+    if config.history.excluded_processes.is_empty() {
+        return false;
+    }
+    let mut process_id = 0;
+    unsafe {
+        GetWindowThreadProcessId(hwnd, &mut process_id);
+    }
+    let Some(name) = process_name(process_id) else {
+        return false;
+    };
+    config
+        .history
+        .excluded_processes
+        .iter()
+        .any(|item| item.eq_ignore_ascii_case(&name))
+}
+
+fn post_point(context: &HookContext, message: u32, x: i32, y: i32) {
+    let hwnd = context.ui_hwnd.load(Ordering::Acquire) as HWND;
+    if hwnd.is_null() {
+        return;
+    }
+    let point = Box::new(UiPoint { x, y });
+    let pointer = Box::into_raw(point);
+    if unsafe { PostMessageW(hwnd, message, 0, pointer as LPARAM) } == 0 {
+        unsafe {
+            drop(Box::from_raw(pointer));
+        }
+    }
+}
+
+fn post_simple(context: &HookContext, message: u32) {
+    let hwnd = context.ui_hwnd.load(Ordering::Acquire) as HWND;
+    if !hwnd.is_null() {
+        unsafe {
+            PostMessageW(hwnd, message, 0, 0);
+        }
+    }
+}
+
+fn trigger_for_event(message: u32, mouse_data: u32) -> Option<TriggerButton> {
+    match message {
+        WM_RBUTTONDOWN | WM_RBUTTONUP => Some(TriggerButton::Right),
+        WM_XBUTTONDOWN | WM_XBUTTONUP => match (mouse_data >> 16) as u16 {
+            value if value == XBUTTON1_VALUE => Some(TriggerButton::X1),
+            value if value == XBUTTON2_VALUE => Some(TriggerButton::X2),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn is_trigger_down(
+    message: u32,
+    event_button: Option<TriggerButton>,
+    configured: TriggerButton,
+) -> bool {
+    matches!(message, WM_RBUTTONDOWN | WM_XBUTTONDOWN)
+        && event_button.is_some_and(|button| button == configured)
+}
+
+fn is_trigger_up(message: u32, event_button: Option<TriggerButton>) -> bool {
+    matches!(message, WM_RBUTTONUP | WM_XBUTTONUP) && event_button.is_some()
+}

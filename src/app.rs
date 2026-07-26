@@ -711,14 +711,21 @@ unsafe extern "system" fn main_proc(
             if let Some(state) = state_mut() {
                 let id = loword(wparam) as i32;
                 match id {
-                    IDC_ENABLED | IDC_AUTOSTART | IDC_CAPTURE | IDC_ENCRYPT_CONTENT
-                    | IDC_DARK_MODE => {
+                    IDC_ENABLED
+                    | IDC_AUTOSTART
+                    | IDC_CAPTURE
+                    | IDC_ENCRYPT_CONTENT
+                    | IDC_DARK_MODE
+                    | IDC_DISABLE_FULLSCREEN_GESTURES => {
                         let control = match id {
                             IDC_ENABLED => state.controls.enabled,
                             IDC_AUTOSTART => state.controls.autostart,
                             IDC_CAPTURE => state.controls.capture,
                             IDC_ENCRYPT_CONTENT => state.controls.encrypt_content,
                             IDC_DARK_MODE => state.controls.dark_mode,
+                            IDC_DISABLE_FULLSCREEN_GESTURES => {
+                                state.controls.disable_fullscreen_gestures
+                            }
                             _ => ptr::null_mut(),
                         };
                         toggle_check(control);
@@ -953,7 +960,12 @@ unsafe extern "system" fn main_proc(
                     draw_button(draw);
                     1
                 }
-                IDC_ENABLED | IDC_AUTOSTART | IDC_CAPTURE | IDC_ENCRYPT_CONTENT | IDC_DARK_MODE => {
+                IDC_ENABLED
+                | IDC_AUTOSTART
+                | IDC_CAPTURE
+                | IDC_ENCRYPT_CONTENT
+                | IDC_DARK_MODE
+                | IDC_DISABLE_FULLSCREEN_GESTURES => {
                     draw_toggle(draw);
                     1
                 }
@@ -1451,6 +1463,10 @@ fn load_config_into_controls(state: &mut AppState) {
     set_check(state.controls.enabled, config.enabled);
     set_check(state.controls.dark_mode, config.dark_mode);
     set_check(state.controls.autostart, config.autostart);
+    set_check(
+        state.controls.disable_fullscreen_gestures,
+        config.gesture_guard.disable_in_fullscreen_apps,
+    );
     set_check(state.controls.capture, config.history.capture);
     set_check(
         state.controls.encrypt_content,
@@ -1792,6 +1808,10 @@ fn read_config_from_controls(state: &AppState) -> Result<AppConfig> {
         search_url_template: current.search_url_template.clone(),
         autostart: is_checked(state.controls.autostart),
         custom_gestures: current.custom_gestures.clone(),
+        gesture_guard: crate::config::GestureGuardConfig {
+            disable_in_fullscreen_apps: is_checked(state.controls.disable_fullscreen_gestures),
+            ..current.gesture_guard
+        },
         history: crate::config::HistoryConfig {
             capture: is_checked(state.controls.capture),
             encrypt_content: is_checked(state.controls.encrypt_content),

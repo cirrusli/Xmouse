@@ -54,6 +54,22 @@ impl Default for HistoryConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct GestureGuardConfig {
+    pub disable_in_fullscreen_apps: bool,
+    pub excluded_processes: Vec<String>,
+}
+
+impl Default for GestureGuardConfig {
+    fn default() -> Self {
+        Self {
+            disable_in_fullscreen_apps: true,
+            excluded_processes: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppConfig {
     pub schema_version: u32,
     pub enabled: bool,
@@ -67,6 +83,7 @@ pub struct AppConfig {
     pub search_url_template: String,
     pub autostart: bool,
     pub custom_gestures: Vec<UserGestureTemplate>,
+    pub gesture_guard: GestureGuardConfig,
     pub history: HistoryConfig,
 }
 
@@ -85,6 +102,7 @@ impl Default for AppConfig {
             search_url_template: DEFAULT_SEARCH_URL.to_owned(),
             autostart: false,
             custom_gestures: Vec::new(),
+            gesture_guard: GestureGuardConfig::default(),
             history: HistoryConfig::default(),
         }
     }
@@ -126,6 +144,15 @@ impl AppConfig {
         }
         if self.custom_gestures.iter().any(|sample| !sample.is_valid()) {
             bail!("个性化手势样本损坏");
+        }
+        if self.gesture_guard.excluded_processes.len() > 256
+            || self
+                .gesture_guard
+                .excluded_processes
+                .iter()
+                .any(|process| process.trim().is_empty() || process.len() > 260)
+        {
+            bail!("手势排除程序列表无效");
         }
         if !(10..=10_000).contains(&self.history.max_items) {
             bail!("历史数量必须在 10–10000 之间");
@@ -220,7 +247,23 @@ mod tests {
     fn older_config_defaults_to_no_personalized_gestures() {
         let config: AppConfig = serde_json::from_str("{}").expect("default config");
         assert!(config.custom_gestures.is_empty());
+        assert!(config.gesture_guard.disable_in_fullscreen_apps);
+        assert!(config.gesture_guard.excluded_processes.is_empty());
         config.validate().expect("default remains valid");
+    }
+
+    #[test]
+    fn gesture_and_clipboard_exclusions_are_independent() {
+        let config: AppConfig = serde_json::from_str(
+            r#"{
+                "gesture_guard": { "excluded_processes": ["game.exe"] },
+                "history": { "excluded_processes": ["password-manager.exe"] }
+            }"#,
+        )
+        .expect("independent exclusions");
+
+        assert_eq!(config.gesture_guard.excluded_processes, ["game.exe"]);
+        assert_eq!(config.history.excluded_processes, ["password-manager.exe"]);
     }
 
     #[test]

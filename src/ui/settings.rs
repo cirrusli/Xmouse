@@ -39,6 +39,7 @@ pub const IDC_NAV_ABOUT: i32 = 1033;
 pub const IDC_OPEN_GITHUB: i32 = 1034;
 pub const IDC_GESTURE_DESKTOP_LEFT: i32 = 1035;
 pub const IDC_GESTURE_DESKTOP_RIGHT: i32 = 1036;
+pub const IDC_DISABLE_FULLSCREEN_GESTURES: i32 = 1037;
 
 const SS_RIGHT_STYLE: u32 = 2;
 
@@ -70,6 +71,7 @@ pub struct Controls {
     pub nav_about: HWND,
     pub enabled: HWND,
     pub dark_mode: HWND,
+    pub disable_fullscreen_gestures: HWND,
     pub trigger_right: HWND,
     pub trigger_x1: HWND,
     pub trigger_x2: HWND,
@@ -113,6 +115,7 @@ impl Default for Controls {
             nav_about: ptr::null_mut(),
             enabled: ptr::null_mut(),
             dark_mode: ptr::null_mut(),
+            disable_fullscreen_gestures: ptr::null_mut(),
             trigger_right: ptr::null_mut(),
             trigger_x1: ptr::null_mut(),
             trigger_x2: ptr::null_mut(),
@@ -262,6 +265,18 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
         IDC_DARK_MODE,
     );
     general_page.push(controls.dark_mode);
+    controls.disable_fullscreen_gestures = builder.control(
+        "BUTTON",
+        "全屏应用中暂停手势",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        0,
+        530,
+        194,
+        270,
+        34,
+        IDC_DISABLE_FULLSCREEN_GESTURES,
+    );
+    general_page.push(controls.disable_fullscreen_gestures);
 
     let trigger_title = builder.label("触发键", 232, 276, 220, 26);
     set_control_font(trigger_title, fonts.section);

@@ -752,6 +752,8 @@ unsafe extern "system" fn main_proc(
                     IDC_NAV_HISTORY => show_settings_page(state, SettingsPage::History),
                     IDC_NAV_GESTURES => show_settings_page(state, SettingsPage::Gestures),
                     IDC_NAV_RESOURCES => show_settings_page(state, SettingsPage::Resources),
+                    IDC_NAV_ABOUT => show_settings_page(state, SettingsPage::About),
+                    IDC_OPEN_GITHUB => open_github_profile(state),
                     IDC_GESTURE_TOPMOST => {
                         select_gesture_training_action(state, GestureAction::ToggleTopmost)
                     }
@@ -940,8 +942,8 @@ unsafe extern "system" fn main_proc(
             let draw = unsafe { &*(lparam as *const DRAWITEMSTRUCT) };
             match draw.CtlID as i32 {
                 IDC_SAVE | IDC_OPEN_HISTORY | IDC_CLEAR_HISTORY | IDC_STATUS | IDC_NAV_GENERAL
-                | IDC_NAV_HISTORY | IDC_NAV_GESTURES | IDC_NAV_RESOURCES | IDC_OPEN_DATA_DIR
-                | IDC_GESTURE_CLEAR => {
+                | IDC_NAV_HISTORY | IDC_NAV_GESTURES | IDC_NAV_RESOURCES | IDC_NAV_ABOUT
+                | IDC_OPEN_DATA_DIR | IDC_GESTURE_CLEAR | IDC_OPEN_GITHUB => {
                     draw_button(draw);
                     1
                 }
@@ -1376,11 +1378,24 @@ fn show_settings_page(state: &mut AppState, page: SettingsPage) {
             );
         }
     }
+    for &control in &state.controls.about_page {
+        unsafe {
+            ShowWindow(
+                control,
+                if page == SettingsPage::About {
+                    SW_SHOW
+                } else {
+                    SW_HIDE
+                },
+            );
+        }
+    }
     let (title, subtitle) = match page {
         SettingsPage::General => ("常规", "手势与启动"),
         SettingsPage::History => ("剪贴板历史", "记录与管理"),
         SettingsPage::Gestures => ("个性化手势", "让 Xmouse 适应你的轨迹"),
         SettingsPage::Resources => ("资源占用", "Xmouse 当前进程"),
+        SettingsPage::About => ("关于", "功能、使用与项目"),
     };
     set_control_text(state.controls.page_title, title);
     set_control_text(state.controls.page_subtitle, subtitle);
@@ -1397,6 +1412,15 @@ fn show_settings_page(state: &mut AppState, page: SettingsPage) {
         InvalidateRect(state.controls.nav_history, ptr::null(), 1);
         InvalidateRect(state.controls.nav_gestures, ptr::null(), 1);
         InvalidateRect(state.controls.nav_resources, ptr::null(), 1);
+        InvalidateRect(state.controls.nav_about, ptr::null(), 1);
+        ShowWindow(
+            state.controls.save,
+            if page == SettingsPage::About {
+                SW_HIDE
+            } else {
+                SW_SHOW
+            },
+        );
         InvalidateRect(state.main_hwnd, ptr::null(), 1);
         if page == SettingsPage::Resources {
             refresh_resource_usage(state);
@@ -1706,6 +1730,7 @@ fn refresh_theme_resources(state: &mut AppState) {
         .chain(state.controls.history_page.iter())
         .chain(state.controls.gestures_page.iter())
         .chain(state.controls.resources_page.iter())
+        .chain(state.controls.about_page.iter())
         .copied()
         .chain([
             state.controls.page_title,
@@ -1715,6 +1740,7 @@ fn refresh_theme_resources(state: &mut AppState) {
             state.controls.nav_history,
             state.controls.nav_gestures,
             state.controls.nav_resources,
+            state.controls.nav_about,
             state.controls.save,
             state.history_search,
             state.history_list,
@@ -2175,6 +2201,24 @@ fn open_data_directory(state: &AppState) {
     }
 }
 
+fn open_github_profile(state: &AppState) {
+    let verb = wide("open");
+    let url = wide("https://github.com/cirrusli");
+    let result = unsafe {
+        ShellExecuteW(
+            state.main_hwnd,
+            verb.as_ptr(),
+            url.as_ptr(),
+            ptr::null(),
+            ptr::null(),
+            1,
+        )
+    };
+    if result as isize <= 32 {
+        post_toast(state.main_hwnd as isize, "无法打开 GitHub");
+    }
+}
+
 fn paint_main_window(hwnd: HWND) {
     let mut paint = PAINTSTRUCT::default();
     let hdc = unsafe { BeginPaint(hwnd, &mut paint) };
@@ -2227,6 +2271,11 @@ fn paint_main_window(hwnd: HWND) {
             (214, 266, 522, 406, 18),
             (536, 266, 858, 406, 18),
             (214, 436, 858, 558, 18),
+        ],
+        SettingsPage::About => &[
+            (214, 100, 858, 258, 18),
+            (214, 274, 858, 458, 18),
+            (214, 476, 858, 632, 18),
         ],
     };
     for &(left, top, right, bottom, radius) in cards {
@@ -2303,12 +2352,13 @@ fn draw_button(draw: &DRAWITEMSTRUCT) {
             | (IDC_NAV_HISTORY, SettingsPage::History)
             | (IDC_NAV_GESTURES, SettingsPage::Gestures)
             | (IDC_NAV_RESOURCES, SettingsPage::Resources)
+            | (IDC_NAV_ABOUT, SettingsPage::About)
     );
     let role = if id == IDC_STATUS {
         ButtonRole::Status { enabled }
     } else if matches!(
         id,
-        IDC_NAV_GENERAL | IDC_NAV_HISTORY | IDC_NAV_GESTURES | IDC_NAV_RESOURCES
+        IDC_NAV_GENERAL | IDC_NAV_HISTORY | IDC_NAV_GESTURES | IDC_NAV_RESOURCES | IDC_NAV_ABOUT
     ) {
         ButtonRole::Navigation { active: nav_active }
     } else if matches!(id, IDC_SAVE | IDC_HISTORY_COPY) {
@@ -2323,7 +2373,7 @@ fn draw_button(draw: &DRAWITEMSTRUCT) {
     };
     let corner_color = if matches!(
         id,
-        IDC_NAV_GENERAL | IDC_NAV_HISTORY | IDC_NAV_GESTURES | IDC_NAV_RESOURCES
+        IDC_NAV_GENERAL | IDC_NAV_HISTORY | IDC_NAV_GESTURES | IDC_NAV_RESOURCES | IDC_NAV_ABOUT
     ) {
         colors.sidebar
     } else if matches!(

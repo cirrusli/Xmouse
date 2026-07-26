@@ -35,6 +35,8 @@ pub const IDC_GESTURE_SEARCH: i32 = 1029;
 pub const IDC_GESTURE_COPY: i32 = 1030;
 pub const IDC_GESTURE_HISTORY: i32 = 1031;
 pub const IDC_GESTURE_CLEAR: i32 = 1032;
+pub const IDC_NAV_ABOUT: i32 = 1033;
+pub const IDC_OPEN_GITHUB: i32 = 1034;
 
 const SS_RIGHT_STYLE: u32 = 2;
 
@@ -44,6 +46,7 @@ pub enum SettingsPage {
     History,
     Gestures,
     Resources,
+    About,
 }
 
 #[derive(Clone, Copy)]
@@ -62,6 +65,7 @@ pub struct Controls {
     pub nav_history: HWND,
     pub nav_gestures: HWND,
     pub nav_resources: HWND,
+    pub nav_about: HWND,
     pub enabled: HWND,
     pub dark_mode: HWND,
     pub trigger_right: HWND,
@@ -83,10 +87,12 @@ pub struct Controls {
     pub gesture_history: HWND,
     pub gesture_clear: HWND,
     pub gesture_status: HWND,
+    pub open_github: HWND,
     pub general_page: Vec<HWND>,
     pub history_page: Vec<HWND>,
     pub gestures_page: Vec<HWND>,
     pub resources_page: Vec<HWND>,
+    pub about_page: Vec<HWND>,
 }
 
 impl Default for Controls {
@@ -100,6 +106,7 @@ impl Default for Controls {
             nav_history: ptr::null_mut(),
             nav_gestures: ptr::null_mut(),
             nav_resources: ptr::null_mut(),
+            nav_about: ptr::null_mut(),
             enabled: ptr::null_mut(),
             dark_mode: ptr::null_mut(),
             trigger_right: ptr::null_mut(),
@@ -121,10 +128,12 @@ impl Default for Controls {
             gesture_history: ptr::null_mut(),
             gesture_clear: ptr::null_mut(),
             gesture_status: ptr::null_mut(),
+            open_github: ptr::null_mut(),
             general_page: Vec::new(),
             history_page: Vec::new(),
             gestures_page: Vec::new(),
             resources_page: Vec::new(),
+            about_page: Vec::new(),
         }
     }
 }
@@ -176,6 +185,17 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
         42,
         IDC_NAV_RESOURCES,
     );
+    controls.nav_about = builder.control(
+        "BUTTON",
+        "关于",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        0,
+        14,
+        304,
+        162,
+        42,
+        IDC_NAV_ABOUT,
+    );
     controls.page_title = builder.label("常规", 220, 24, 300, 34);
     set_control_font(controls.page_title, fonts.title);
     controls.page_subtitle = builder.label("手势与启动", 221, 58, 440, 22);
@@ -195,6 +215,7 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
     let mut history_page = Vec::new();
     let mut gestures_page = Vec::new();
     let mut resources_page = Vec::new();
+    let mut about_page = Vec::new();
 
     let startup_title = builder.label("基础", 232, 116, 160, 26);
     set_control_font(startup_title, fonts.section);
@@ -482,6 +503,73 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
     controls.resource_details = builder.label("", 232, 490, 580, 56);
     resources_page.push(controls.resource_details);
 
+    let about_name = builder.label("Xmouse", 232, 122, 240, 42);
+    set_control_font(about_name, fonts.title);
+    about_page.push(about_name);
+    let version = format!(
+        "v{} · Windows 10/11 x64 · Rust + Win32",
+        env!("CARGO_PKG_VERSION")
+    );
+    about_page.push(builder.label(&version, 232, 166, 560, 24));
+    about_page.push(builder.label(
+        "轻量鼠标手势与剪贴板历史工具，不依赖 WebView 或托管 UI 运行时。",
+        232,
+        202,
+        590,
+        24,
+    ));
+    about_page.push(builder.label(
+        "专注于低资源占用、快速响应和本地数据管理。",
+        232,
+        228,
+        590,
+        24,
+    ));
+
+    let usage_title = builder.label("使用方式", 232, 288, 180, 28);
+    set_control_font(usage_title, fonts.section);
+    about_page.push(usage_title);
+    about_page.push(builder.label(
+        "1. 按住触发键并绘制：↑ 置顶 · L 关闭 · S 搜索 · C 复制 · V 历史",
+        232,
+        330,
+        590,
+        24,
+    ));
+    about_page.push(builder.label(
+        "2. 普通点击仍会保留原按键功能；Edge 冲突时可在常规页改用侧键。",
+        232,
+        366,
+        590,
+        24,
+    ));
+    about_page.push(builder.label(
+        "3. 剪贴板历史支持搜索、置顶、图片预览和点击窗口外关闭。",
+        232,
+        402,
+        590,
+        24,
+    ));
+
+    let project_title = builder.label("项目与作者", 232, 500, 180, 28);
+    set_control_font(project_title, fonts.section);
+    about_page.push(project_title);
+    about_page.push(builder.label("作者：cirrusli", 232, 540, 240, 22));
+    about_page.push(builder.label("GitHub：github.com/cirrusli", 232, 568, 360, 22));
+    about_page.push(builder.label("项目：github.com/cirrusli/Xmouse", 232, 594, 380, 22));
+    controls.open_github = builder.control(
+        "BUTTON",
+        "访问 GitHub",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        0,
+        690,
+        532,
+        136,
+        40,
+        IDC_OPEN_GITHUB,
+    );
+    about_page.push(controls.open_github);
+
     controls.save = builder.control(
         "BUTTON",
         "保存设置",
@@ -498,6 +586,7 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
     controls.history_page = history_page;
     controls.gestures_page = gestures_page;
     controls.resources_page = resources_page;
+    controls.about_page = about_page;
     controls
 }
 

@@ -1,9 +1,12 @@
 [package]
 name = "xmouse"
-version = "0.7.4"
+version = "0.8.0"
 edition = "2024"
 description = "Lightweight native Windows mouse gestures and clipboard history"
 license = "MIT"
+authors = ["cirrusli"]
+repository = "https://github.com/cirrusli/Xmouse"
+homepage = "https://github.com/cirrusli/Xmouse"
 
 [dependencies]
 anyhow = "1.0"

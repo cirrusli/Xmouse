@@ -2,7 +2,9 @@ use crate::{
     actions::{post_toast, run_worker},
     clipboard::ClipboardService,
     config::{self, AppConfig, TriggerButton},
-    gesture::{GestureMatch, Point as GesturePoint, Recognizer},
+    gesture::{
+        GestureAction, GestureMatch, Point as GesturePoint, Recognizer, UserGestureTemplate,
+    },
     hook::{
         self, HookCommand, UiPoint, WM_APP_CAPTURE_DONE, WM_APP_OVERLAY_BEGIN, WM_APP_OVERLAY_END,
         WM_APP_OVERLAY_POINT, WM_APP_SHOW_HISTORY, WM_APP_TOAST, WM_APP_TRAY,
@@ -12,6 +14,7 @@ use crate::{
     storage::{ClipKind, ClipPayload, Storage},
     ui::{
         format::{format_bytes, format_uptime},
+        gesture_editor,
         history_popup::{self, *},
         history_preview::PreviewImage,
         history_view::{HistoryView, draw_history_item as draw_history_row},
@@ -66,8 +69,8 @@ use windows_sys::Win32::{
         },
         HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext},
         Input::KeyboardAndMouse::{
-            EnableWindow, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_DELETE,
-            VK_ESCAPE, VK_RETURN,
+            EnableWindow, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT,
+            TrackMouseEvent, VK_DELETE, VK_ESCAPE, VK_RETURN,
         },
         Shell::{
             NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
@@ -90,10 +93,10 @@ use windows_sys::Win32::{
             TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE,
             WINDOW_STYLE, WM_CLIPBOARDUPDATE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT,
             WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND,
-            WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_TIMER,
-            WNDCLASSEXW, WS_CAPTION, WS_CLIPCHILDREN, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-            WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MINIMIZEBOX, WS_OVERLAPPED,
-            WS_POPUP, WS_SYSMENU,
+            WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT,
+            WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_CAPTION, WS_CLIPCHILDREN, WS_EX_LAYERED,
+            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MINIMIZEBOX,
+            WS_OVERLAPPED, WS_POPUP, WS_SYSMENU,
         },
     },
 };
@@ -146,6 +149,9 @@ struct AppState {
     gesture_recognizer: Recognizer,
     gesture_preview: Option<GestureMatch>,
     last_gesture_preview_at: Option<Instant>,
+    gesture_training_action: GestureAction,
+    gesture_training_points: Vec<GesturePoint>,
+    gesture_training_drawing: bool,
     toast_text: String,
     history_items: Vec<HistoryView>,
     history_origin: isize,
@@ -182,6 +188,8 @@ pub fn run() -> Result<()> {
         load_warning = Some(format!("开机自启修复失败：{error:#}"));
     }
     let dark_mode = config_value.dark_mode;
+    let mut gesture_recognizer = Recognizer::new();
+    gesture_recognizer.set_user_templates(&config_value.custom_gestures);
     let config = Arc::new(RwLock::new(config_value));
     let root = config::app_data_dir()?;
     logging::init(&root)?;
@@ -224,9 +232,12 @@ pub fn run() -> Result<()> {
         capture_sender,
         controls: Controls::default(),
         overlay_points: Vec::with_capacity(512),
-        gesture_recognizer: Recognizer::new(),
+        gesture_recognizer,
         gesture_preview: None,
         last_gesture_preview_at: None,
+        gesture_training_action: GestureAction::SearchSelection,
+        gesture_training_points: Vec::with_capacity(512),
+        gesture_training_drawing: false,
         toast_text: String::new(),
         history_items: Vec::new(),
         history_origin: 0,
@@ -683,6 +694,7 @@ unsafe extern "system" fn main_proc(
                 refresh_history_usage(state);
                 show_settings_page(state, SettingsPage::General);
                 load_config_into_controls(state);
+                refresh_gesture_training_ui(state);
                 refresh_theme_resources(state);
                 if unsafe { AddClipboardFormatListener(hwnd) } == 0 {
                     post_toast(hwnd as isize, "无法监听剪贴板更新");
@@ -734,7 +746,24 @@ unsafe extern "system" fn main_proc(
                     IDC_OPEN_DATA_DIR => open_data_directory(state),
                     IDC_NAV_GENERAL => show_settings_page(state, SettingsPage::General),
                     IDC_NAV_HISTORY => show_settings_page(state, SettingsPage::History),
+                    IDC_NAV_GESTURES => show_settings_page(state, SettingsPage::Gestures),
                     IDC_NAV_RESOURCES => show_settings_page(state, SettingsPage::Resources),
+                    IDC_GESTURE_TOPMOST => {
+                        select_gesture_training_action(state, GestureAction::ToggleTopmost)
+                    }
+                    IDC_GESTURE_CLOSE => {
+                        select_gesture_training_action(state, GestureAction::CloseTab)
+                    }
+                    IDC_GESTURE_SEARCH => {
+                        select_gesture_training_action(state, GestureAction::SearchSelection)
+                    }
+                    IDC_GESTURE_COPY => {
+                        select_gesture_training_action(state, GestureAction::CopySelection)
+                    }
+                    IDC_GESTURE_HISTORY => {
+                        select_gesture_training_action(state, GestureAction::OpenHistory)
+                    }
+                    IDC_GESTURE_CLEAR => clear_current_gesture_samples(state),
                     id if id as usize == IDM_SETTINGS => unsafe {
                         ShowWindow(hwnd, SW_RESTORE);
                         SetForegroundWindow(hwnd);
@@ -848,11 +877,63 @@ unsafe extern "system" fn main_proc(
             }
             0
         }
+        WM_LBUTTONDOWN => {
+            if let Some(state) = state_mut() {
+                let (x, y) = client_point(lparam);
+                if state.active_settings_page == SettingsPage::Gestures
+                    && gesture_editor::contains(x, y)
+                {
+                    state.gesture_training_points.clear();
+                    state
+                        .gesture_training_points
+                        .push(GesturePoint::new(x as f32, y as f32));
+                    state.gesture_training_drawing = true;
+                    unsafe {
+                        SetCapture(hwnd);
+                        InvalidateRect(hwnd, &gesture_editor::CANVAS_RECT, 0);
+                    }
+                    return 0;
+                }
+            }
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+        }
+        WM_MOUSEMOVE => {
+            if let Some(state) = state_mut()
+                && state.gesture_training_drawing
+            {
+                let (x, y) = client_point(lparam);
+                append_gesture_training_point(state, x, y);
+                unsafe {
+                    InvalidateRect(hwnd, &gesture_editor::CANVAS_RECT, 0);
+                }
+                return 0;
+            }
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+        }
+        WM_LBUTTONUP => {
+            if let Some(state) = state_mut()
+                && state.gesture_training_drawing
+            {
+                let (x, y) = client_point(lparam);
+                append_gesture_training_point(state, x, y);
+                state.gesture_training_drawing = false;
+                unsafe {
+                    ReleaseCapture();
+                }
+                finish_gesture_training(state);
+                unsafe {
+                    InvalidateRect(hwnd, &gesture_editor::CANVAS_RECT, 0);
+                }
+                return 0;
+            }
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+        }
         WM_DRAWITEM => {
             let draw = unsafe { &*(lparam as *const DRAWITEMSTRUCT) };
             match draw.CtlID as i32 {
                 IDC_SAVE | IDC_OPEN_HISTORY | IDC_CLEAR_HISTORY | IDC_STATUS | IDC_NAV_GENERAL
-                | IDC_NAV_HISTORY | IDC_NAV_RESOURCES | IDC_OPEN_DATA_DIR => {
+                | IDC_NAV_HISTORY | IDC_NAV_GESTURES | IDC_NAV_RESOURCES | IDC_OPEN_DATA_DIR
+                | IDC_GESTURE_CLEAR => {
                     draw_button(draw);
                     1
                 }
@@ -860,7 +941,9 @@ unsafe extern "system" fn main_proc(
                     draw_toggle(draw);
                     1
                 }
-                IDC_TRIGGER_RIGHT | IDC_TRIGGER_X1 | IDC_TRIGGER_X2 => {
+                IDC_TRIGGER_RIGHT | IDC_TRIGGER_X1 | IDC_TRIGGER_X2 | IDC_GESTURE_TOPMOST
+                | IDC_GESTURE_CLOSE | IDC_GESTURE_SEARCH | IDC_GESTURE_COPY
+                | IDC_GESTURE_HISTORY => {
                     draw_choice(draw);
                     1
                 }
@@ -1252,6 +1335,18 @@ fn show_settings_page(state: &mut AppState, page: SettingsPage) {
             );
         }
     }
+    for &control in &state.controls.gestures_page {
+        unsafe {
+            ShowWindow(
+                control,
+                if page == SettingsPage::Gestures {
+                    SW_SHOW
+                } else {
+                    SW_HIDE
+                },
+            );
+        }
+    }
     for &control in &state.controls.resources_page {
         unsafe {
             ShowWindow(
@@ -1267,6 +1362,7 @@ fn show_settings_page(state: &mut AppState, page: SettingsPage) {
     let (title, subtitle) = match page {
         SettingsPage::General => ("常规", "手势与启动"),
         SettingsPage::History => ("剪贴板历史", "记录与管理"),
+        SettingsPage::Gestures => ("个性化手势", "让 Xmouse 适应你的轨迹"),
         SettingsPage::Resources => ("资源占用", "Xmouse 当前进程"),
     };
     set_control_text(state.controls.page_title, title);
@@ -1282,6 +1378,7 @@ fn show_settings_page(state: &mut AppState, page: SettingsPage) {
         );
         InvalidateRect(state.controls.nav_general, ptr::null(), 1);
         InvalidateRect(state.controls.nav_history, ptr::null(), 1);
+        InvalidateRect(state.controls.nav_gestures, ptr::null(), 1);
         InvalidateRect(state.controls.nav_resources, ptr::null(), 1);
         InvalidateRect(state.main_hwnd, ptr::null(), 1);
         if page == SettingsPage::Resources {
@@ -1306,6 +1403,7 @@ fn load_config_into_controls(state: &mut AppState) {
         config.history.encrypt_content,
     );
     select_trigger(state, config.trigger);
+    refresh_gesture_training_ui(state);
     refresh_status(state);
     refresh_history_usage(state);
 }
@@ -1346,6 +1444,194 @@ fn select_trigger(state: &AppState, trigger: TriggerButton) {
             InvalidateRect(control, ptr::null(), 1);
         }
     }
+}
+
+fn gesture_action_control(state: &AppState, action: GestureAction) -> HWND {
+    match action {
+        GestureAction::ToggleTopmost => state.controls.gesture_topmost,
+        GestureAction::CloseTab => state.controls.gesture_close,
+        GestureAction::SearchSelection => state.controls.gesture_search,
+        GestureAction::CopySelection => state.controls.gesture_copy,
+        GestureAction::OpenHistory => state.controls.gesture_history,
+    }
+}
+
+fn select_gesture_training_action(state: &mut AppState, action: GestureAction) {
+    state.gesture_training_action = action;
+    state.gesture_training_points.clear();
+    refresh_gesture_training_ui(state);
+    unsafe {
+        InvalidateRect(state.main_hwnd, &gesture_editor::CANVAS_RECT, 0);
+    }
+}
+
+fn refresh_gesture_training_ui(state: &AppState) {
+    for action in GestureAction::ALL {
+        let control = gesture_action_control(state, action);
+        set_check(control, action == state.gesture_training_action);
+        if !control.is_null() {
+            unsafe {
+                InvalidateRect(control, ptr::null(), 1);
+            }
+        }
+    }
+    let count = state
+        .config
+        .read()
+        .expect("config poisoned")
+        .custom_gestures
+        .iter()
+        .filter(|sample| sample.action == state.gesture_training_action)
+        .count();
+    set_control_text(
+        state.controls.gesture_status,
+        &format!(
+            "已选择 {} · 已学习 {count}/3 份样本",
+            state.gesture_training_action.short_label()
+        ),
+    );
+    unsafe {
+        EnableWindow(state.controls.gesture_clear, i32::from(count > 0));
+    }
+}
+
+fn append_gesture_training_point(state: &mut AppState, x: i32, y: i32) {
+    if state.gesture_training_points.len() >= 512 {
+        return;
+    }
+    let x = x.clamp(
+        gesture_editor::CANVAS_RECT.left + 2,
+        gesture_editor::CANVAS_RECT.right - 2,
+    );
+    let y = y.clamp(
+        gesture_editor::CANVAS_RECT.top + 2,
+        gesture_editor::CANVAS_RECT.bottom - 2,
+    );
+    let next = GesturePoint::new(x as f32, y as f32);
+    let should_add = state
+        .gesture_training_points
+        .last()
+        .map(|previous| {
+            let dx = previous.x - next.x;
+            let dy = previous.y - next.y;
+            dx * dx + dy * dy >= 2.25
+        })
+        .unwrap_or(true);
+    if should_add {
+        state.gesture_training_points.push(next);
+    }
+}
+
+fn finish_gesture_training(state: &mut AppState) {
+    let length: f32 = state
+        .gesture_training_points
+        .windows(2)
+        .map(|pair| {
+            let dx = pair[1].x - pair[0].x;
+            let dy = pair[1].y - pair[0].y;
+            (dx * dx + dy * dy).sqrt()
+        })
+        .sum();
+    if length < 60.0 {
+        state.gesture_training_points.clear();
+        set_control_text(state.controls.gesture_status, "轨迹太短，请重新绘制");
+        post_toast(state.main_hwnd as isize, "轨迹太短，未保存");
+        return;
+    }
+    let Some(sample) = UserGestureTemplate::from_stroke(
+        state.gesture_training_action,
+        &state.gesture_training_points,
+    ) else {
+        state.gesture_training_points.clear();
+        set_control_text(state.controls.gesture_status, "轨迹无效，请重新绘制");
+        return;
+    };
+
+    let mut next = state.config.read().expect("config poisoned").clone();
+    while next
+        .custom_gestures
+        .iter()
+        .filter(|stored| stored.action == sample.action)
+        .count()
+        >= 3
+    {
+        if let Some(index) = next
+            .custom_gestures
+            .iter()
+            .position(|stored| stored.action == sample.action)
+        {
+            next.custom_gestures.remove(index);
+        }
+    }
+    next.custom_gestures.push(sample);
+    if let Err(error) = save_gesture_config(state, next) {
+        logging::error("保存个性化手势", &error);
+        post_toast(
+            state.main_hwnd as isize,
+            &format!("手势保存失败：{error:#}"),
+        );
+        return;
+    }
+    refresh_gesture_training_ui(state);
+    post_toast(
+        state.main_hwnd as isize,
+        &format!("已学习 {}", state.gesture_training_action.short_label()),
+    );
+}
+
+fn clear_current_gesture_samples(state: &mut AppState) {
+    let action = state.gesture_training_action;
+    let count = state
+        .config
+        .read()
+        .expect("config poisoned")
+        .custom_gestures
+        .iter()
+        .filter(|sample| sample.action == action)
+        .count();
+    if count == 0 {
+        post_toast(state.main_hwnd as isize, "当前动作还没有个性化样本");
+        return;
+    }
+    let prompt = wide(&format!(
+        "确定清除 {} 的 {count} 份个性化样本吗？\n清除后仍会使用内置模板。",
+        action.short_label()
+    ));
+    let title = wide("清除个性化手势");
+    let answer = unsafe {
+        MessageBoxW(
+            state.main_hwnd,
+            prompt.as_ptr(),
+            title.as_ptr(),
+            MB_YESNO | MB_ICONQUESTION,
+        )
+    };
+    if answer != IDYES {
+        return;
+    }
+    let mut next = state.config.read().expect("config poisoned").clone();
+    next.custom_gestures
+        .retain(|sample| sample.action != action);
+    if let Err(error) = save_gesture_config(state, next) {
+        logging::error("清除个性化手势", &error);
+        post_toast(state.main_hwnd as isize, &format!("清除失败：{error:#}"));
+        return;
+    }
+    state.gesture_training_points.clear();
+    refresh_gesture_training_ui(state);
+    unsafe {
+        InvalidateRect(state.main_hwnd, &gesture_editor::CANVAS_RECT, 0);
+    }
+    post_toast(state.main_hwnd as isize, "已恢复使用内置模板");
+}
+
+fn save_gesture_config(state: &mut AppState, next: AppConfig) -> Result<()> {
+    config::save(&state.config_path, &next)?;
+    state
+        .gesture_recognizer
+        .set_user_templates(&next.custom_gestures);
+    *state.config.write().expect("config poisoned") = next;
+    Ok(())
 }
 
 fn refresh_resource_usage(state: &mut AppState) {
@@ -1401,6 +1687,7 @@ fn refresh_theme_resources(state: &mut AppState) {
         .general_page
         .iter()
         .chain(state.controls.history_page.iter())
+        .chain(state.controls.gestures_page.iter())
         .chain(state.controls.resources_page.iter())
         .copied()
         .chain([
@@ -1409,6 +1696,7 @@ fn refresh_theme_resources(state: &mut AppState) {
             state.controls.status,
             state.controls.nav_general,
             state.controls.nav_history,
+            state.controls.nav_gestures,
             state.controls.nav_resources,
             state.controls.save,
             state.history_search,
@@ -1445,6 +1733,7 @@ fn read_config_from_controls(state: &AppState) -> Result<AppConfig> {
         show_trail: current.show_trail,
         search_url_template: current.search_url_template.clone(),
         autostart: is_checked(state.controls.autostart),
+        custom_gestures: current.custom_gestures.clone(),
         history: crate::config::HistoryConfig {
             capture: is_checked(state.controls.capture),
             encrypt_content: is_checked(state.controls.encrypt_content),
@@ -1900,6 +2189,7 @@ fn paint_main_window(hwnd: HWND) {
             (214, 394, 858, 548, 18),
         ],
         SettingsPage::History => &[(214, 100, 858, 218, 18), (214, 244, 858, 410, 18)],
+        SettingsPage::Gestures => &[(214, 100, 858, 230, 18), (214, 244, 858, 620, 18)],
         SettingsPage::Resources => &[
             (214, 104, 522, 244, 18),
             (536, 104, 858, 244, 18),
@@ -1910,6 +2200,26 @@ fn paint_main_window(hwnd: HWND) {
     };
     for &(left, top, right, bottom, radius) in cards {
         widgets::rounded_panel(hdc, left, top, right, bottom, radius, colors);
+    }
+
+    if state.active_settings_page == SettingsPage::Gestures {
+        let sample_count = state
+            .config
+            .read()
+            .expect("config poisoned")
+            .custom_gestures
+            .iter()
+            .filter(|sample| sample.action == state.gesture_training_action)
+            .count();
+        gesture_editor::draw(
+            hdc,
+            colors,
+            state.font_body,
+            state.gesture_training_action,
+            sample_count,
+            &state.gesture_training_points,
+            state.gesture_training_drawing,
+        );
     }
 
     settings::draw_sidebar_identity(
@@ -1960,23 +2270,30 @@ fn draw_button(draw: &DRAWITEMSTRUCT) {
         (id, state.active_settings_page),
         (IDC_NAV_GENERAL, SettingsPage::General)
             | (IDC_NAV_HISTORY, SettingsPage::History)
+            | (IDC_NAV_GESTURES, SettingsPage::Gestures)
             | (IDC_NAV_RESOURCES, SettingsPage::Resources)
     );
     let role = if id == IDC_STATUS {
         ButtonRole::Status { enabled }
-    } else if matches!(id, IDC_NAV_GENERAL | IDC_NAV_HISTORY | IDC_NAV_RESOURCES) {
+    } else if matches!(
+        id,
+        IDC_NAV_GENERAL | IDC_NAV_HISTORY | IDC_NAV_GESTURES | IDC_NAV_RESOURCES
+    ) {
         ButtonRole::Navigation { active: nav_active }
     } else if matches!(id, IDC_SAVE | IDC_HISTORY_COPY) {
         ButtonRole::Primary
     } else if matches!(
         id,
-        IDC_CLEAR_HISTORY | IDC_HISTORY_DELETE | IDC_HISTORY_CLEAR
+        IDC_CLEAR_HISTORY | IDC_HISTORY_DELETE | IDC_HISTORY_CLEAR | IDC_GESTURE_CLEAR
     ) {
         ButtonRole::Danger
     } else {
         ButtonRole::Secondary
     };
-    let corner_color = if matches!(id, IDC_NAV_GENERAL | IDC_NAV_HISTORY | IDC_NAV_RESOURCES) {
+    let corner_color = if matches!(
+        id,
+        IDC_NAV_GENERAL | IDC_NAV_HISTORY | IDC_NAV_GESTURES | IDC_NAV_RESOURCES
+    ) {
         colors.sidebar
     } else if matches!(
         id,
@@ -2300,6 +2617,14 @@ fn loword(value: usize) -> u16 {
 
 fn hiword(value: usize) -> u16 {
     ((value >> 16) & 0xffff) as u16
+}
+
+fn client_point(value: LPARAM) -> (i32, i32) {
+    let packed = value as u32;
+    (
+        (packed as u16 as i16) as i32,
+        ((packed >> 16) as u16 as i16) as i32,
+    )
 }
 
 fn wide(value: &str) -> Vec<u16> {

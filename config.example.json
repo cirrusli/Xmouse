@@ -10,6 +10,7 @@
   "show_trail": true,
   "search_url_template": "https://www.google.com/search?q={query}",
   "autostart": false,
+  "custom_gestures": [],
   "history": {
     "capture": true,
     "encrypt_content": false,

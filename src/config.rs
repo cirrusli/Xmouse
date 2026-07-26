@@ -1,3 +1,4 @@
+use crate::gesture::{GestureAction, UserGestureTemplate};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -65,6 +66,7 @@ pub struct AppConfig {
     pub show_trail: bool,
     pub search_url_template: String,
     pub autostart: bool,
+    pub custom_gestures: Vec<UserGestureTemplate>,
     pub history: HistoryConfig,
 }
 
@@ -82,6 +84,7 @@ impl Default for AppConfig {
             show_trail: true,
             search_url_template: DEFAULT_SEARCH_URL.to_owned(),
             autostart: false,
+            custom_gestures: Vec::new(),
             history: HistoryConfig::default(),
         }
     }
@@ -106,6 +109,23 @@ impl AppConfig {
         }
         if !self.search_url_template.contains("{query}") {
             bail!("搜索网址必须包含 {{query}}");
+        }
+        if self.custom_gestures.len() > GestureAction::ALL.len() * 3 {
+            bail!("每个动作最多保存 3 个个性化手势样本");
+        }
+        for action in GestureAction::ALL {
+            if self
+                .custom_gestures
+                .iter()
+                .filter(|sample| sample.action == action)
+                .count()
+                > 3
+            {
+                bail!("{} 的个性化样本超过 3 个", action.short_label());
+            }
+        }
+        if self.custom_gestures.iter().any(|sample| !sample.is_valid()) {
+            bail!("个性化手势样本损坏");
         }
         if !(10..=10_000).contains(&self.history.max_items) {
             bail!("历史数量必须在 10–10000 之间");
@@ -189,4 +209,34 @@ pub fn save(path: &Path, config: &AppConfig) -> Result<()> {
         return Err(error).with_context(|| format!("保存配置失败：{}", path.display()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gesture::Point;
+
+    #[test]
+    fn older_config_defaults_to_no_personalized_gestures() {
+        let config: AppConfig = serde_json::from_str("{}").expect("default config");
+        assert!(config.custom_gestures.is_empty());
+        config.validate().expect("default remains valid");
+    }
+
+    #[test]
+    fn limits_personalized_samples_per_action() {
+        let points = (0..64)
+            .map(|index| Point::new(index as f32, index as f32))
+            .collect();
+        let sample = UserGestureTemplate {
+            action: GestureAction::SearchSelection,
+            points,
+        };
+        assert!(sample.is_valid());
+        let config = AppConfig {
+            custom_gestures: vec![sample; 4],
+            ..AppConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
 }

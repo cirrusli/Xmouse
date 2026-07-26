@@ -28,6 +28,13 @@ pub const IDC_TRIGGER_RIGHT: i32 = 1022;
 pub const IDC_TRIGGER_X1: i32 = 1023;
 pub const IDC_TRIGGER_X2: i32 = 1024;
 pub const IDC_NAV_RESOURCES: i32 = 1025;
+pub const IDC_NAV_GESTURES: i32 = 1026;
+pub const IDC_GESTURE_TOPMOST: i32 = 1027;
+pub const IDC_GESTURE_CLOSE: i32 = 1028;
+pub const IDC_GESTURE_SEARCH: i32 = 1029;
+pub const IDC_GESTURE_COPY: i32 = 1030;
+pub const IDC_GESTURE_HISTORY: i32 = 1031;
+pub const IDC_GESTURE_CLEAR: i32 = 1032;
 
 const SS_RIGHT_STYLE: u32 = 2;
 
@@ -35,6 +42,7 @@ const SS_RIGHT_STYLE: u32 = 2;
 pub enum SettingsPage {
     General,
     History,
+    Gestures,
     Resources,
 }
 
@@ -52,6 +60,7 @@ pub struct Controls {
     pub page_subtitle: HWND,
     pub nav_general: HWND,
     pub nav_history: HWND,
+    pub nav_gestures: HWND,
     pub nav_resources: HWND,
     pub enabled: HWND,
     pub dark_mode: HWND,
@@ -67,8 +76,16 @@ pub struct Controls {
     pub resource_working_set: HWND,
     pub resource_gpu: HWND,
     pub resource_details: HWND,
+    pub gesture_topmost: HWND,
+    pub gesture_close: HWND,
+    pub gesture_search: HWND,
+    pub gesture_copy: HWND,
+    pub gesture_history: HWND,
+    pub gesture_clear: HWND,
+    pub gesture_status: HWND,
     pub general_page: Vec<HWND>,
     pub history_page: Vec<HWND>,
+    pub gestures_page: Vec<HWND>,
     pub resources_page: Vec<HWND>,
 }
 
@@ -81,6 +98,7 @@ impl Default for Controls {
             page_subtitle: ptr::null_mut(),
             nav_general: ptr::null_mut(),
             nav_history: ptr::null_mut(),
+            nav_gestures: ptr::null_mut(),
             nav_resources: ptr::null_mut(),
             enabled: ptr::null_mut(),
             dark_mode: ptr::null_mut(),
@@ -96,8 +114,16 @@ impl Default for Controls {
             resource_working_set: ptr::null_mut(),
             resource_gpu: ptr::null_mut(),
             resource_details: ptr::null_mut(),
+            gesture_topmost: ptr::null_mut(),
+            gesture_close: ptr::null_mut(),
+            gesture_search: ptr::null_mut(),
+            gesture_copy: ptr::null_mut(),
+            gesture_history: ptr::null_mut(),
+            gesture_clear: ptr::null_mut(),
+            gesture_status: ptr::null_mut(),
             general_page: Vec::new(),
             history_page: Vec::new(),
+            gestures_page: Vec::new(),
             resources_page: Vec::new(),
         }
     }
@@ -128,13 +154,24 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
         42,
         IDC_NAV_HISTORY,
     );
+    controls.nav_gestures = builder.control(
+        "BUTTON",
+        "个性化手势",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        0,
+        14,
+        204,
+        162,
+        42,
+        IDC_NAV_GESTURES,
+    );
     controls.nav_resources = builder.control(
         "BUTTON",
         "资源占用",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
         0,
         14,
-        204,
+        254,
         162,
         42,
         IDC_NAV_RESOURCES,
@@ -156,6 +193,7 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
 
     let mut general_page = Vec::new();
     let mut history_page = Vec::new();
+    let mut gestures_page = Vec::new();
     let mut resources_page = Vec::new();
 
     let startup_title = builder.label("基础", 232, 116, 160, 26);
@@ -333,6 +371,86 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
     history_page.push(open_data);
     history_page.push(builder.label("按 V 可在光标附近快速打开历史", 232, 376, 420, 22));
 
+    let gestures_title = builder.label("选择要学习的动作", 232, 116, 260, 26);
+    set_control_font(gestures_title, fonts.section);
+    gestures_page.push(gestures_title);
+    controls.gesture_topmost = builder.control(
+        "BUTTON",
+        "↑ 置顶",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        0,
+        232,
+        154,
+        112,
+        40,
+        IDC_GESTURE_TOPMOST,
+    );
+    controls.gesture_close = builder.control(
+        "BUTTON",
+        "L 关闭",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        0,
+        354,
+        154,
+        112,
+        40,
+        IDC_GESTURE_CLOSE,
+    );
+    controls.gesture_search = builder.control(
+        "BUTTON",
+        "S 搜索",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        0,
+        476,
+        154,
+        112,
+        40,
+        IDC_GESTURE_SEARCH,
+    );
+    controls.gesture_copy = builder.control(
+        "BUTTON",
+        "C 复制",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        0,
+        598,
+        154,
+        112,
+        40,
+        IDC_GESTURE_COPY,
+    );
+    controls.gesture_history = builder.control(
+        "BUTTON",
+        "V 历史",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        0,
+        720,
+        154,
+        112,
+        40,
+        IDC_GESTURE_HISTORY,
+    );
+    gestures_page.extend([
+        controls.gesture_topmost,
+        controls.gesture_close,
+        controls.gesture_search,
+        controls.gesture_copy,
+        controls.gesture_history,
+    ]);
+    controls.gesture_status = builder.label("", 232, 202, 590, 22);
+    gestures_page.push(controls.gesture_status);
+    controls.gesture_clear = builder.control(
+        "BUTTON",
+        "清除当前动作样本",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        0,
+        232,
+        568,
+        174,
+        40,
+        IDC_GESTURE_CLEAR,
+    );
+    gestures_page.push(controls.gesture_clear);
+
     let cpu_title = builder.label("CPU", 232, 124, 120, 24);
     resources_page.push(cpu_title);
     controls.resource_cpu = builder.label("0.00%", 232, 154, 250, 44);
@@ -378,6 +496,7 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
 
     controls.general_page = general_page;
     controls.history_page = history_page;
+    controls.gestures_page = gestures_page;
     controls.resources_page = resources_page;
     controls
 }

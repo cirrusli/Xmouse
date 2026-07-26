@@ -51,6 +51,10 @@ impl ClipboardService {
         self.ignored_updates.fetch_add(count, Ordering::AcqRel);
     }
 
+    pub fn clear_ignored_updates(&self) {
+        self.ignored_updates.store(0, Ordering::Release);
+    }
+
     pub fn consume_ignored_update(&self) -> bool {
         let mut current = self.ignored_updates.load(Ordering::Acquire);
         while current > 0 {

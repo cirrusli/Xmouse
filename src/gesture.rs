@@ -1,9 +1,10 @@
+use serde::{Deserialize, Serialize};
 use std::f32::consts::PI;
 
 const SAMPLE_COUNT: usize = 64;
 const MIN_MARGIN: f32 = 0.06;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct Point {
     pub x: f32,
     pub y: f32,
@@ -19,7 +20,8 @@ impl Point {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum GestureAction {
     ToggleTopmost,
     CloseTab,
@@ -29,6 +31,24 @@ pub enum GestureAction {
 }
 
 impl GestureAction {
+    pub const ALL: [Self; 5] = [
+        Self::ToggleTopmost,
+        Self::CloseTab,
+        Self::SearchSelection,
+        Self::CopySelection,
+        Self::OpenHistory,
+    ];
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::ToggleTopmost => "↑ 置顶窗口",
+            Self::CloseTab => "L 关闭页面",
+            Self::SearchSelection => "S 搜索选中内容",
+            Self::CopySelection => "C 复制内容",
+            Self::OpenHistory => "V 剪贴板历史",
+        }
+    }
+
     #[cfg(test)]
     pub fn label(self) -> &'static str {
         match self {
@@ -51,6 +71,30 @@ impl GestureAction {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UserGestureTemplate {
+    pub action: GestureAction,
+    pub points: Vec<Point>,
+}
+
+impl UserGestureTemplate {
+    pub fn from_stroke(action: GestureAction, points: &[Point]) -> Option<Self> {
+        Some(Self {
+            action,
+            points: normalized_points(points)?,
+        })
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.points.len() == SAMPLE_COUNT
+            && self
+                .points
+                .iter()
+                .all(|point| point.x.is_finite() && point.y.is_finite())
+            && normalize(&self.points).is_some()
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct GestureMatch {
     pub action: GestureAction,
@@ -64,7 +108,8 @@ struct Template {
 }
 
 pub struct Recognizer {
-    templates: Vec<Template>,
+    built_in_templates: Vec<Template>,
+    user_templates: Vec<Template>,
 }
 
 impl Default for Recognizer {
@@ -83,14 +128,33 @@ impl Recognizer {
                 }
             }
         }
-        Self { templates }
+        Self {
+            built_in_templates: templates,
+            user_templates: Vec::new(),
+        }
+    }
+
+    pub fn set_user_templates(&mut self, samples: &[UserGestureTemplate]) {
+        self.user_templates = samples
+            .iter()
+            .filter_map(|sample| {
+                normalize(&sample.points).map(|vector| Template {
+                    action: sample.action,
+                    vector,
+                })
+            })
+            .collect();
     }
 
     pub fn recognize(&self, points: &[Point], threshold: f32) -> Option<GestureMatch> {
         let candidate = normalize(points)?;
         let mut by_action: Vec<(GestureAction, f32)> = Vec::new();
 
-        for template in &self.templates {
+        for template in self
+            .built_in_templates
+            .iter()
+            .chain(self.user_templates.iter())
+        {
             let score = cosine_similarity(&candidate, &template.vector);
             if let Some((_, best)) = by_action
                 .iter_mut()
@@ -162,7 +226,7 @@ fn resample(points: &[Point], count: usize) -> Option<Vec<Point>> {
     Some(result)
 }
 
-fn normalize(points: &[Point]) -> Option<Vec<f32>> {
+fn normalized_points(points: &[Point]) -> Option<Vec<Point>> {
     let points = resample(points, SAMPLE_COUNT)?;
     let min_x = points.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
     let max_x = points.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max);
@@ -174,10 +238,16 @@ fn normalize(points: &[Point]) -> Option<Vec<f32>> {
     }
     let center_x = points.iter().map(|p| p.x).sum::<f32>() / points.len() as f32;
     let center_y = points.iter().map(|p| p.y).sum::<f32>() / points.len() as f32;
-    let normalized: Vec<Point> = points
-        .iter()
-        .map(|p| Point::new((p.x - center_x) / scale, (p.y - center_y) / scale))
-        .collect();
+    Some(
+        points
+            .iter()
+            .map(|p| Point::new((p.x - center_x) / scale, (p.y - center_y) / scale))
+            .collect(),
+    )
+}
+
+fn normalize(points: &[Point]) -> Option<Vec<f32>> {
+    let normalized = normalized_points(points)?;
 
     let mut vector = Vec::with_capacity((SAMPLE_COUNT - 1) * 2);
     for pair in normalized.windows(2) {
@@ -325,5 +395,26 @@ mod tests {
                 .recognize(&[Point::new(1.0, 1.0), Point::new(1.0, 1.0)], 0.8)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn learns_a_personalized_template() {
+        let zigzag = line(&[
+            (0.0, 0.0),
+            (30.0, 70.0),
+            (60.0, 5.0),
+            (90.0, 75.0),
+            (120.0, 10.0),
+        ]);
+        let sample = UserGestureTemplate::from_stroke(GestureAction::SearchSelection, &zigzag)
+            .expect("valid sample");
+        assert!(sample.is_valid());
+
+        let mut recognizer = Recognizer::new();
+        recognizer.set_user_templates(&[sample]);
+        let matched = recognizer
+            .recognize(&jitter(&zigzag, 0.15), 0.82)
+            .expect("personalized gesture should match");
+        assert_eq!(matched.action, GestureAction::SearchSelection);
     }
 }

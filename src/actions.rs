@@ -1,7 +1,7 @@
 use crate::{
     clipboard::ClipboardService,
     config::AppConfig,
-    gesture::{GestureAction, Recognizer},
+    gesture::{GestureAction, Recognizer, UserGestureTemplate},
     hook::{HookCommand, INJECTED_EVENT_TOKEN, WM_APP_SHOW_HISTORY, WM_APP_TOAST, replay_button},
     logging,
 };
@@ -51,16 +51,21 @@ pub fn run_worker(
             unsafe {
                 let _ = OleInitialize(None);
             }
-            let recognizer = Recognizer::new();
+            let mut recognizer = Recognizer::new();
+            let mut loaded_user_templates: Vec<UserGestureTemplate> = Vec::new();
             while let Ok(command) = receiver.recv() {
                 let result = match command {
                     HookCommand::Replay(button) => replay_button(button),
                     HookCommand::Cancelled => Ok(()),
                     HookCommand::Stroke(stroke) => {
-                        let threshold = config
-                            .read()
-                            .expect("config poisoned")
-                            .recognition_threshold;
+                        let (threshold, user_templates) = {
+                            let config = config.read().expect("config poisoned");
+                            (config.recognition_threshold, config.custom_gestures.clone())
+                        };
+                        if user_templates != loaded_user_templates {
+                            recognizer.set_user_templates(&user_templates);
+                            loaded_user_templates = user_templates;
+                        }
                         let Some(matched) = recognizer.recognize(&stroke.points, threshold) else {
                             post_toast(ui_hwnd, "未识别手势");
                             continue;
@@ -222,12 +227,13 @@ fn search_selection(
     clipboard: &ClipboardService,
     ui_hwnd: isize,
 ) -> Result<()> {
-    let text = selected_text_via_uia(target)
-        .ok()
-        .flatten()
-        .filter(|text| !text.trim().is_empty())
-        .or_else(|| selected_text_via_clipboard(clipboard).ok().flatten())
-        .context("没有读取到选中文本")?;
+    let text = match selected_text_via_uia(target) {
+        Ok(Some(text)) if !text.trim().is_empty() => Some(text),
+        _ => selected_text_via_clipboard(clipboard)
+            .context("临时复制选中文本失败")?
+            .filter(|text| !text.trim().is_empty()),
+    }
+    .context("没有读取到选中文本")?;
     let trimmed = text.trim();
     if trimmed.is_empty() {
         bail!("没有选中文本");
@@ -281,23 +287,30 @@ fn selected_text_via_clipboard(clipboard: &ClipboardService) -> Result<Option<St
     let capture_result = (|| {
         let before = unsafe { GetClipboardSequenceNumber() };
         send_ctrl_key(b'C' as u16)?;
-        let started = Instant::now();
-        while started.elapsed() < Duration::from_millis(450) {
-            if unsafe { GetClipboardSequenceNumber() } != before {
-                break;
+        let deadline = Instant::now() + Duration::from_millis(1_500);
+        let mut clipboard_changed = false;
+        let mut last_read_error = None;
+        while Instant::now() < deadline {
+            clipboard_changed |= unsafe { GetClipboardSequenceNumber() } != before;
+            if clipboard_changed {
+                match clipboard.read_current_text() {
+                    Ok(Some(text)) if !text.trim().is_empty() => return Ok(Some(text)),
+                    Ok(_) => {}
+                    Err(error) => last_read_error = Some(error),
+                }
             }
-            thread::sleep(Duration::from_millis(10));
+            thread::sleep(Duration::from_millis(15));
         }
-        if unsafe { GetClipboardSequenceNumber() } == before {
-            return Ok(None);
+        if let Some(error) = last_read_error {
+            return Err(error).context("剪贴板已更新，但文本仍不可读");
         }
-        clipboard.read_current_text()
+        Ok(None)
     })();
-    let restore_result = unsafe {
-        OleSetClipboard(&snapshot).context("恢复原剪贴板失败")?;
-        OleFlushClipboard().context("固化原剪贴板失败")
-    };
-    thread::sleep(Duration::from_millis(30));
+    let restore_result = unsafe { OleSetClipboard(&snapshot) }
+        .context("恢复原剪贴板失败")
+        .and_then(|_| unsafe { OleFlushClipboard() }.context("固化原剪贴板失败"));
+    thread::sleep(Duration::from_millis(80));
+    clipboard.clear_ignored_updates();
     restore_result?;
     capture_result
 }

@@ -769,6 +769,12 @@ unsafe extern "system" fn main_proc(
                     IDC_GESTURE_HISTORY => {
                         select_gesture_training_action(state, GestureAction::OpenHistory)
                     }
+                    IDC_GESTURE_DESKTOP_LEFT => {
+                        select_gesture_training_action(state, GestureAction::SwitchDesktopLeft)
+                    }
+                    IDC_GESTURE_DESKTOP_RIGHT => {
+                        select_gesture_training_action(state, GestureAction::SwitchDesktopRight)
+                    }
                     IDC_GESTURE_CLEAR => clear_current_gesture_samples(state),
                     id if id as usize == IDM_SETTINGS => unsafe {
                         ShowWindow(hwnd, SW_RESTORE);
@@ -951,9 +957,16 @@ unsafe extern "system" fn main_proc(
                     draw_toggle(draw);
                     1
                 }
-                IDC_TRIGGER_RIGHT | IDC_TRIGGER_X1 | IDC_TRIGGER_X2 | IDC_GESTURE_TOPMOST
-                | IDC_GESTURE_CLOSE | IDC_GESTURE_SEARCH | IDC_GESTURE_COPY
-                | IDC_GESTURE_HISTORY => {
+                IDC_TRIGGER_RIGHT
+                | IDC_TRIGGER_X1
+                | IDC_TRIGGER_X2
+                | IDC_GESTURE_TOPMOST
+                | IDC_GESTURE_CLOSE
+                | IDC_GESTURE_SEARCH
+                | IDC_GESTURE_COPY
+                | IDC_GESTURE_HISTORY
+                | IDC_GESTURE_DESKTOP_LEFT
+                | IDC_GESTURE_DESKTOP_RIGHT => {
                     draw_choice(draw);
                     1
                 }
@@ -1494,6 +1507,8 @@ fn gesture_action_control(state: &AppState, action: GestureAction) -> HWND {
         GestureAction::SearchSelection => state.controls.gesture_search,
         GestureAction::CopySelection => state.controls.gesture_copy,
         GestureAction::OpenHistory => state.controls.gesture_history,
+        GestureAction::SwitchDesktopLeft => state.controls.gesture_desktop_left,
+        GestureAction::SwitchDesktopRight => state.controls.gesture_desktop_right,
     }
 }
 
@@ -2264,7 +2279,7 @@ fn paint_main_window(hwnd: HWND) {
             (214, 394, 858, 548, 18),
         ],
         SettingsPage::History => &[(214, 100, 858, 218, 18), (214, 244, 858, 410, 18)],
-        SettingsPage::Gestures => &[(214, 100, 858, 230, 18), (214, 244, 858, 620, 18)],
+        SettingsPage::Gestures => &[(214, 100, 858, 288, 18), (214, 300, 858, 620, 18)],
         SettingsPage::Resources => &[
             (214, 104, 522, 244, 18),
             (536, 104, 858, 244, 18),

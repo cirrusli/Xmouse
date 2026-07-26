@@ -28,6 +28,7 @@ use windows_sys::Win32::{
     UI::{
         Input::KeyboardAndMouse::{
             INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VK_CONTROL,
+            VK_LEFT, VK_LWIN, VK_RIGHT,
         },
         Shell::ShellExecuteW,
         WindowsAndMessaging::{
@@ -124,6 +125,16 @@ fn execute_action(
             }
             Ok(())
         }
+        GestureAction::SwitchDesktopLeft => {
+            send_virtual_desktop_switch(VK_LEFT)?;
+            post_toast(ui_hwnd, "已切换到左侧桌面");
+            Ok(())
+        }
+        GestureAction::SwitchDesktopRight => {
+            send_virtual_desktop_switch(VK_RIGHT)?;
+            post_toast(ui_hwnd, "已切换到右侧桌面");
+            Ok(())
+        }
     }
 }
 
@@ -205,6 +216,28 @@ fn send_ctrl_key(key: u16) -> Result<()> {
     };
     if sent != inputs.len() as u32 {
         bail!("SendInput 被系统或目标程序拒绝");
+    }
+    Ok(())
+}
+
+fn send_virtual_desktop_switch(direction: u16) -> Result<()> {
+    let mut inputs = [
+        keyboard_input(VK_LWIN, 0),
+        keyboard_input(VK_CONTROL, 0),
+        keyboard_input(direction, 0),
+        keyboard_input(direction, KEYEVENTF_KEYUP),
+        keyboard_input(VK_CONTROL, KEYEVENTF_KEYUP),
+        keyboard_input(VK_LWIN, KEYEVENTF_KEYUP),
+    ];
+    let sent = unsafe {
+        SendInput(
+            inputs.len() as u32,
+            inputs.as_mut_ptr(),
+            std::mem::size_of::<INPUT>() as i32,
+        )
+    };
+    if sent != inputs.len() as u32 {
+        bail!("切换桌面的快捷键被系统拒绝");
     }
     Ok(())
 }

@@ -12,7 +12,7 @@ use windows_sys::Win32::{
 
 pub const CANVAS_RECT: RECT = RECT {
     left: 232,
-    top: 256,
+    top: 310,
     right: 832,
     bottom: 546,
 };

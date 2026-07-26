@@ -28,15 +28,19 @@ pub enum GestureAction {
     SearchSelection,
     CopySelection,
     OpenHistory,
+    SwitchDesktopLeft,
+    SwitchDesktopRight,
 }
 
 impl GestureAction {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 7] = [
         Self::ToggleTopmost,
         Self::CloseTab,
         Self::SearchSelection,
         Self::CopySelection,
         Self::OpenHistory,
+        Self::SwitchDesktopLeft,
+        Self::SwitchDesktopRight,
     ];
 
     pub fn short_label(self) -> &'static str {
@@ -46,6 +50,8 @@ impl GestureAction {
             Self::SearchSelection => "S 搜索选中内容",
             Self::CopySelection => "C 复制内容",
             Self::OpenHistory => "V 剪贴板历史",
+            Self::SwitchDesktopLeft => "← 左侧桌面",
+            Self::SwitchDesktopRight => "→ 右侧桌面",
         }
     }
 
@@ -57,6 +63,8 @@ impl GestureAction {
             Self::SearchSelection => "搜索选中内容",
             Self::CopySelection => "复制",
             Self::OpenHistory => "剪贴板历史",
+            Self::SwitchDesktopLeft => "左侧桌面",
+            Self::SwitchDesktopRight => "右侧桌面",
         }
     }
 
@@ -67,6 +75,8 @@ impl GestureAction {
             Self::SearchSelection => "S · 搜索选中内容",
             Self::CopySelection => "C · 复制内容",
             Self::OpenHistory => "V · 打开剪贴板历史",
+            Self::SwitchDesktopLeft => "← · 切换到左侧桌面",
+            Self::SwitchDesktopRight => "→ · 切换到右侧桌面",
         }
     }
 }
@@ -311,6 +321,14 @@ fn template_points() -> Vec<(GestureAction, Vec<Vec<Point>>)> {
         line(&[(50.0, 100.0), (50.0, 0.0)]),
         line(&[(45.0, 100.0), (50.0, 0.0)]),
     ];
+    let desktop_left = vec![
+        line(&[(100.0, 50.0), (0.0, 50.0)]),
+        line(&[(100.0, 54.0), (0.0, 48.0)]),
+    ];
+    let desktop_right = vec![
+        line(&[(0.0, 50.0), (100.0, 50.0)]),
+        line(&[(0.0, 48.0), (100.0, 54.0)]),
+    ];
     let l = vec![
         line(&[(25.0, 0.0), (25.0, 100.0), (100.0, 100.0)]),
         line(&[(30.0, 0.0), (25.0, 95.0), (100.0, 100.0)]),
@@ -355,6 +373,8 @@ fn template_points() -> Vec<(GestureAction, Vec<Vec<Point>>)> {
         (GestureAction::SearchSelection, vec![s1, s2]),
         (GestureAction::CopySelection, c),
         (GestureAction::OpenHistory, v),
+        (GestureAction::SwitchDesktopLeft, desktop_left),
+        (GestureAction::SwitchDesktopRight, desktop_right),
     ]
 }
 
@@ -425,5 +445,21 @@ mod tests {
             .expect("valid personalized stroke");
         assert_eq!(sample.points.len(), SAMPLE_COUNT);
         assert!(sample.is_valid());
+    }
+
+    #[test]
+    fn horizontal_desktop_gestures_keep_their_direction() {
+        let recognizer = Recognizer::new();
+        let left = line(&[(180.0, 42.0), (20.0, 46.0)]);
+        let right = line(&[(20.0, 46.0), (180.0, 42.0)]);
+
+        assert_eq!(
+            recognizer.recognize(&left, 0.82).unwrap().action,
+            GestureAction::SwitchDesktopLeft
+        );
+        assert_eq!(
+            recognizer.recognize(&right, 0.82).unwrap().action,
+            GestureAction::SwitchDesktopRight
+        );
     }
 }

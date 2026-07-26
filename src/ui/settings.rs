@@ -37,6 +37,8 @@ pub const IDC_GESTURE_HISTORY: i32 = 1031;
 pub const IDC_GESTURE_CLEAR: i32 = 1032;
 pub const IDC_NAV_ABOUT: i32 = 1033;
 pub const IDC_OPEN_GITHUB: i32 = 1034;
+pub const IDC_GESTURE_DESKTOP_LEFT: i32 = 1035;
+pub const IDC_GESTURE_DESKTOP_RIGHT: i32 = 1036;
 
 const SS_RIGHT_STYLE: u32 = 2;
 
@@ -85,6 +87,8 @@ pub struct Controls {
     pub gesture_search: HWND,
     pub gesture_copy: HWND,
     pub gesture_history: HWND,
+    pub gesture_desktop_left: HWND,
+    pub gesture_desktop_right: HWND,
     pub gesture_clear: HWND,
     pub gesture_status: HWND,
     pub open_github: HWND,
@@ -126,6 +130,8 @@ impl Default for Controls {
             gesture_search: ptr::null_mut(),
             gesture_copy: ptr::null_mut(),
             gesture_history: ptr::null_mut(),
+            gesture_desktop_left: ptr::null_mut(),
+            gesture_desktop_right: ptr::null_mut(),
             gesture_clear: ptr::null_mut(),
             gesture_status: ptr::null_mut(),
             open_github: ptr::null_mut(),
@@ -309,6 +315,7 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
         26,
     ));
     general_page.push(builder.label("C  复制内容        V  打开剪贴板历史", 232, 492, 590, 24));
+    general_page.push(builder.label("←  左侧桌面        →  右侧桌面", 232, 520, 590, 24));
 
     controls.history_usage = builder.control(
         "STATIC",
@@ -450,14 +457,38 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
         40,
         IDC_GESTURE_HISTORY,
     );
+    controls.gesture_desktop_left = builder.control(
+        "BUTTON",
+        "← 左桌面",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        0,
+        232,
+        202,
+        112,
+        40,
+        IDC_GESTURE_DESKTOP_LEFT,
+    );
+    controls.gesture_desktop_right = builder.control(
+        "BUTTON",
+        "→ 右桌面",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        0,
+        354,
+        202,
+        112,
+        40,
+        IDC_GESTURE_DESKTOP_RIGHT,
+    );
     gestures_page.extend([
         controls.gesture_topmost,
         controls.gesture_close,
         controls.gesture_search,
         controls.gesture_copy,
         controls.gesture_history,
+        controls.gesture_desktop_left,
+        controls.gesture_desktop_right,
     ]);
-    controls.gesture_status = builder.label("", 232, 202, 590, 22);
+    controls.gesture_status = builder.label("", 232, 252, 590, 22);
     gestures_page.push(controls.gesture_status);
     controls.gesture_clear = builder.control(
         "BUTTON",
@@ -530,21 +561,21 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
     set_control_font(usage_title, fonts.section);
     about_page.push(usage_title);
     about_page.push(builder.label(
-        "1. 按住触发键并绘制：↑ 置顶 · L 关闭 · S 搜索 · C 复制 · V 历史",
+        "1. 按住触发键并绘制，松开后执行对应动作。",
         232,
         330,
         590,
         24,
     ));
     about_page.push(builder.label(
-        "2. 普通点击仍会保留原按键功能；Edge 冲突时可在常规页改用侧键。",
+        "2. ← / → 切换虚拟桌面；其他手势见常规页。",
         232,
         366,
         590,
         24,
     ));
     about_page.push(builder.label(
-        "3. 剪贴板历史支持搜索、置顶、图片预览和点击窗口外关闭。",
+        "3. Edge 冲突时可改用侧键；普通点击仍保留原按键功能。",
         232,
         402,
         590,

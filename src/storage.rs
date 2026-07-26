@@ -22,6 +22,8 @@ use windows::{
     core::PCWSTR,
 };
 
+const DATABASE_SCHEMA_VERSION: i64 = 2;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClipKind {
     Text,
@@ -78,6 +80,7 @@ pub enum ClipPayload {
 pub struct ClipItem {
     pub id: i64,
     pub kind: ClipKind,
+    pub pinned: bool,
     pub text: Option<String>,
     pub thumbnail_png: Option<Vec<u8>>,
     pub source_exe: String,
@@ -90,6 +93,7 @@ pub struct ClipItem {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StorageStats {
     pub item_count: u64,
+    pub pinned_count: u64,
     pub content_bytes: u64,
     pub disk_bytes: u64,
 }
@@ -152,6 +156,13 @@ impl Storage {
 
     fn initialize(&self) -> Result<()> {
         let connection = self.connect()?;
+        let schema_version: i64 =
+            connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if schema_version > DATABASE_SCHEMA_VERSION {
+            bail!(
+                "剪贴板数据库版本 {schema_version} 高于当前程序支持的版本 {DATABASE_SCHEMA_VERSION}"
+            );
+        }
         connection.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS clips (
@@ -168,7 +179,9 @@ impl Storage {
                 byte_size           INTEGER NOT NULL,
                 created_at          INTEGER NOT NULL,
                 last_used_at        INTEGER NOT NULL,
-                content_encoding    TEXT NOT NULL DEFAULT 'plain'
+                content_encoding    TEXT NOT NULL DEFAULT 'plain',
+                pinned              INTEGER NOT NULL DEFAULT 0,
+                pinned_at           INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_clips_last_used
                 ON clips(last_used_at DESC);
@@ -200,6 +213,36 @@ impl Storage {
         if !has_plain_text {
             connection.execute("ALTER TABLE clips ADD COLUMN plain_text TEXT", [])?;
         }
+        let has_pinned: bool = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info('clips')
+                WHERE name = 'pinned'
+            )",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_pinned {
+            connection.execute(
+                "ALTER TABLE clips ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        let has_pinned_at: bool = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info('clips')
+                WHERE name = 'pinned_at'
+            )",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_pinned_at {
+            connection.execute("ALTER TABLE clips ADD COLUMN pinned_at INTEGER", [])?;
+        }
+        connection.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_clips_pinned
+                 ON clips(pinned DESC, pinned_at DESC, last_used_at DESC);",
+        )?;
+        connection.pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)?;
         Ok(())
     }
 
@@ -385,9 +428,9 @@ impl Storage {
             SELECT
                 id, kind, protected_text, protected_thumbnail, source_exe,
                 width, height, byte_size, last_used_at, content_encoding,
-                plain_text
+                plain_text, pinned
             FROM clips
-            ORDER BY last_used_at DESC, id DESC
+            ORDER BY pinned DESC, pinned_at DESC, last_used_at DESC, id DESC
             ",
         )?;
         let mut rows = statement.query([])?;
@@ -426,6 +469,7 @@ impl Storage {
             let item = ClipItem {
                 id: row.get(0)?,
                 kind,
+                pinned: row.get::<_, i64>(11)? != 0,
                 text,
                 thumbnail_png: protected_thumbnail
                     .as_deref()
@@ -503,6 +547,19 @@ impl Storage {
         Ok(())
     }
 
+    pub fn set_pinned(&self, id: i64, pinned: bool) -> Result<()> {
+        let changed = self.connect()?.execute(
+            "UPDATE clips
+             SET pinned = ?1, pinned_at = ?2
+             WHERE id = ?3",
+            params![if pinned { 1 } else { 0 }, pinned.then(unix_millis), id],
+        )?;
+        if changed == 0 {
+            bail!("找不到历史记录 {id}");
+        }
+        Ok(())
+    }
+
     pub fn remove(&self, id: i64) -> Result<()> {
         let connection = self.connect()?;
         let media: Option<String> = connection
@@ -535,10 +592,13 @@ impl Storage {
 
     pub fn stats(&self) -> Result<StorageStats> {
         let connection = self.connect()?;
-        let (count, content_bytes): (i64, i64) = connection.query_row(
-            "SELECT COUNT(*), COALESCE(SUM(byte_size), 0) FROM clips",
+        let (count, pinned_count, content_bytes): (i64, i64, i64) = connection.query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(CASE WHEN pinned != 0 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(byte_size), 0)
+             FROM clips",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
         drop(connection);
 
@@ -552,6 +612,7 @@ impl Storage {
         }
         Ok(StorageStats {
             item_count: count.max(0) as u64,
+            pinned_count: pinned_count.max(0) as u64,
             content_bytes: content_bytes.max(0) as u64,
             disk_bytes,
         })
@@ -563,7 +624,9 @@ impl Storage {
         let connection = self.connect()?;
         loop {
             let (count, bytes): (i64, i64) = connection.query_row(
-                "SELECT COUNT(*), COALESCE(SUM(byte_size), 0) FROM clips",
+                "SELECT COALESCE(SUM(CASE WHEN pinned = 0 THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(byte_size), 0)
+                 FROM clips",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
@@ -575,6 +638,7 @@ impl Storage {
                     "
                     SELECT id, media_name
                     FROM clips
+                    WHERE pinned = 0
                     ORDER BY last_used_at ASC, id ASC
                     LIMIT 1
                     ",
@@ -865,6 +929,14 @@ fn write_i32(bytes: &mut [u8], value: i32) {
 mod tests {
     use super::*;
 
+    fn temporary_root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "xmouse-{label}-{}-{}",
+            std::process::id(),
+            unix_millis()
+        ))
+    }
+
     #[test]
     fn dib_round_trip_preserves_dimensions() {
         let image =
@@ -899,11 +971,7 @@ mod tests {
 
     #[test]
     fn plaintext_history_is_readable_for_debugging() {
-        let root = std::env::temp_dir().join(format!(
-            "xmouse-plaintext-test-{}-{}",
-            std::process::id(),
-            unix_millis()
-        ));
+        let root = temporary_root("plaintext-test");
         let config = Arc::new(RwLock::new(AppConfig::default()));
         let storage = Storage::open(root.clone(), config).unwrap();
         storage
@@ -935,11 +1003,7 @@ mod tests {
 
     #[test]
     fn corrupt_database_is_backed_up_and_recreated() {
-        let root = std::env::temp_dir().join(format!(
-            "xmouse-storage-test-{}-{}",
-            std::process::id(),
-            unix_millis()
-        ));
+        let root = temporary_root("storage-test");
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("history.db"), b"not a sqlite database").unwrap();
         let config = Arc::new(RwLock::new(AppConfig::default()));
@@ -952,6 +1016,160 @@ mod tests {
                 .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
         );
         drop(storage);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pinned_items_sort_first_and_toggle() {
+        let root = temporary_root("pin-sort-test");
+        let config = Arc::new(RwLock::new(AppConfig::default()));
+        let storage = Storage::open(root.clone(), config).unwrap();
+        storage
+            .store(ClipPayload::Text("第一条".to_owned()), "first.exe")
+            .unwrap();
+        storage
+            .store(ClipPayload::Text("第二条".to_owned()), "second.exe")
+            .unwrap();
+
+        let first_id = storage
+            .list("")
+            .unwrap()
+            .into_iter()
+            .find(|item| item.text.as_deref() == Some("第一条"))
+            .unwrap()
+            .id;
+        storage.set_pinned(first_id, true).unwrap();
+
+        let items = storage.list("").unwrap();
+        assert_eq!(items[0].id, first_id);
+        assert!(items[0].pinned);
+        assert_eq!(storage.stats().unwrap().pinned_count, 1);
+
+        storage
+            .store(ClipPayload::Text("第一条".to_owned()), "updated.exe")
+            .unwrap();
+        let refreshed = storage.list("").unwrap();
+        assert_eq!(refreshed[0].id, first_id);
+        assert!(refreshed[0].pinned);
+        assert_eq!(refreshed[0].source_exe, "updated.exe");
+
+        storage.set_pinned(first_id, false).unwrap();
+        let item = storage
+            .list("")
+            .unwrap()
+            .into_iter()
+            .find(|item| item.id == first_id)
+            .unwrap();
+        assert!(!item.pinned);
+        drop(storage);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pinned_items_survive_regular_capacity_eviction() {
+        let root = temporary_root("pin-eviction-test");
+        let mut config_value = AppConfig::default();
+        config_value.history.max_items = 1;
+        let config = Arc::new(RwLock::new(config_value));
+        let storage = Storage::open(root.clone(), config).unwrap();
+
+        storage
+            .store(ClipPayload::Text("保留".to_owned()), "keep.exe")
+            .unwrap();
+        let keep_id = storage.list("").unwrap()[0].id;
+        storage.set_pinned(keep_id, true).unwrap();
+        storage
+            .store(ClipPayload::Text("应淘汰".to_owned()), "old.exe")
+            .unwrap();
+        storage
+            .store(ClipPayload::Text("最新".to_owned()), "new.exe")
+            .unwrap();
+
+        let items = storage.list("").unwrap();
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().any(|item| item.id == keep_id && item.pinned));
+        assert!(
+            items
+                .iter()
+                .any(|item| item.text.as_deref() == Some("最新"))
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|item| item.text.as_deref() == Some("应淘汰"))
+        );
+        drop(storage);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn existing_database_is_migrated_for_pins() {
+        let root = temporary_root("pin-migration-test");
+        fs::create_dir_all(&root).unwrap();
+        let connection = Connection::open(root.join("history.db")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE clips (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind TEXT NOT NULL,
+                    content_hash BLOB NOT NULL UNIQUE,
+                    protected_text BLOB,
+                    plain_text TEXT,
+                    media_name TEXT,
+                    protected_thumbnail BLOB,
+                    source_exe TEXT NOT NULL DEFAULT '',
+                    width INTEGER,
+                    height INTEGER,
+                    byte_size INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    last_used_at INTEGER NOT NULL,
+                    content_encoding TEXT NOT NULL DEFAULT 'plain'
+                );",
+            )
+            .unwrap();
+        drop(connection);
+
+        let config = Arc::new(RwLock::new(AppConfig::default()));
+        let storage = Storage::open(root.clone(), config).unwrap();
+        let connection = storage.connect().unwrap();
+        let has_pin_columns: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('clips')
+                 WHERE name IN ('pinned', 'pinned_at')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_pin_columns, 2);
+        let schema_version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(schema_version, DATABASE_SCHEMA_VERSION);
+        drop(connection);
+        drop(storage);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn future_database_schema_is_rejected_without_downgrade() {
+        let root = temporary_root("future-schema-test");
+        fs::create_dir_all(&root).unwrap();
+        let connection = Connection::open(root.join("history.db")).unwrap();
+        connection.pragma_update(None, "user_version", 99).unwrap();
+        drop(connection);
+
+        let config = Arc::new(RwLock::new(AppConfig::default()));
+        let error = match Storage::open(root.clone(), config) {
+            Ok(_) => panic!("future schema should be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("高于当前程序支持"));
+        let connection = Connection::open(root.join("history.db")).unwrap();
+        let schema_version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(schema_version, 99);
+        drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
 }

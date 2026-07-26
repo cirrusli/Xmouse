@@ -9,6 +9,7 @@ mod hook;
 mod logging;
 mod resources;
 mod storage;
+mod ui;
 
 fn main() {
     if let Err(error) = app::run() {

@@ -8,7 +8,17 @@ use crate::{
     },
     logging,
     resources::{ProcessUsage, UsageSampler},
-    storage::{ClipItem, Storage},
+    storage::Storage,
+    ui::{
+        format::{format_bytes, format_uptime},
+        history_popup::{self, *},
+        history_view::{HistoryView, draw_history_item as draw_history_row},
+        settings::{self, Controls, Fonts as SettingsFonts, SettingsPage, *},
+        theme::{
+            ACCENT_COLOR, apply_child_theme, apply_window_theme, create_ui_font, palette, rgb,
+        },
+        widgets::{self, ButtonRole},
+    },
 };
 use anyhow::{Result, bail};
 use std::{
@@ -25,19 +35,16 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::{
-        COLORREF, CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HINSTANCE, HWND, LPARAM,
-        LRESULT, POINT, RECT, WPARAM,
+        CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT,
+        POINT, RECT, WPARAM,
     },
-    Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute},
     Graphics::Gdi::{
-        BITMAPINFO, BITMAPINFOHEADER, BeginPaint, CLEARTYPE_QUALITY, COLOR_WINDOW, CreateFontW,
-        CreatePen, CreateRoundRectRgn, CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_PITCH,
-        DIB_RGB_COLORS, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER,
-        DeleteObject, DrawTextW, Ellipse, EndPaint, FF_DONTCARE, FW_NORMAL, FW_SEMIBOLD, FillRect,
-        GetMonitorInfoW, HBRUSH, HFONT, InvalidateRect, LineTo, MONITOR_DEFAULTTONEAREST,
-        MONITORINFO, MonitorFromPoint, MoveToEx, PAINTSTRUCT, PS_SOLID, RoundRect, SRCCOPY,
-        ScreenToClient, SelectObject, SetBkColor, SetBkMode, SetTextColor, SetWindowRgn,
-        StretchDIBits, TRANSPARENT,
+        BeginPaint, COLOR_WINDOW, CreatePen, CreateRoundRectRgn, CreateSolidBrush, DT_CENTER,
+        DT_END_ELLIPSIS, DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FW_NORMAL,
+        FW_SEMIBOLD, FillRect, GetMonitorInfoW, HBRUSH, HFONT, InvalidateRect, LineTo,
+        MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, MoveToEx, PAINTSTRUCT, PS_SOLID,
+        RoundRect, ScreenToClient, SelectObject, SetBkColor, SetBkMode, SetTextColor, SetWindowRgn,
+        TRANSPARENT,
     },
     System::{
         Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize},
@@ -52,36 +59,33 @@ use windows_sys::Win32::{
     UI::{
         Controls::{
             DRAWITEMSTRUCT, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx,
-            ODS_SELECTED, SetWindowTheme,
         },
         HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext},
-        Input::KeyboardAndMouse::{SetFocus, VK_DELETE, VK_ESCAPE, VK_RETURN},
+        Input::KeyboardAndMouse::{EnableWindow, SetFocus, VK_DELETE, VK_ESCAPE, VK_RETURN},
         Shell::{
             NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
             Shell_NotifyIconW, ShellExecuteW,
         },
         WindowsAndMessaging::{
-            AppendMenuW, BS_OWNERDRAW, CW_USEDEFAULT, CreatePopupMenu, CreateWindowExW,
-            DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, EN_CHANGE,
-            ES_AUTOHSCROLL, FindWindowW, GA_ROOT, GWLP_USERDATA, GetAncestor, GetClientRect,
-            GetCursorPos, GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
-            GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HMENU, HTTRANSPARENT,
-            HWND_TOPMOST, IDC_ARROW, IDI_APPLICATION, IDYES, IsWindowVisible, KillTimer,
-            LB_ADDSTRING, LB_GETCURSEL, LB_RESETCONTENT, LB_SETCURSEL, LB_SETITEMHEIGHT,
-            LBN_DBLCLK, LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT, LBS_NOTIFY, LBS_OWNERDRAWFIXED,
-            LoadCursorW, LoadIconW, MB_ICONERROR, MB_ICONQUESTION, MB_OK, MB_YESNO, MF_CHECKED,
-            MF_SEPARATOR, MF_STRING, MSG, MessageBoxW, PostQuitMessage, RegisterClassExW,
-            SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE,
-            SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SendMessageW,
-            SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW,
-            SetWindowPos, SetWindowTextW, ShowWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
-            TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE,
-            WINDOW_STYLE, WM_CLIPBOARDUPDATE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT,
-            WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND,
-            WM_KEYDOWN, WM_LBUTTONUP, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_SETFONT, WM_TIMER,
-            WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-            WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MINIMIZEBOX, WS_OVERLAPPED,
-            WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+            AppendMenuW, CW_USEDEFAULT, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
+            DestroyMenu, DestroyWindow, DispatchMessageW, EN_CHANGE, FindWindowW, GA_ROOT,
+            GWLP_USERDATA, GetAncestor, GetClientRect, GetCursorPos, GetForegroundWindow,
+            GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW,
+            GetWindowTextW, HMENU, HTTRANSPARENT, HWND_TOPMOST, IDC_ARROW, IDI_APPLICATION, IDYES,
+            IsWindowVisible, KillTimer, LB_ADDSTRING, LB_GETCURSEL, LB_RESETCONTENT, LB_SETCURSEL,
+            LBN_DBLCLK, LBN_SELCHANGE, LoadCursorW, LoadIconW, MB_ICONERROR, MB_ICONQUESTION,
+            MB_OK, MB_YESNO, MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG, MessageBoxW,
+            PostQuitMessage, RegisterClassExW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+            SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE,
+            SWP_NOACTIVATE, SWP_SHOWWINDOW, SendMessageW, SetForegroundWindow,
+            SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
+            ShowWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+            TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLIPBOARDUPDATE,
+            WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX,
+            WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONUP,
+            WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_CAPTION,
+            WS_CLIPCHILDREN, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+            WS_EX_TRANSPARENT, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU,
         },
     },
 };
@@ -92,152 +96,13 @@ const OVERLAY_CLASS: &str = "Xmouse.Overlay";
 const TOAST_CLASS: &str = "Xmouse.Toast";
 const APP_ICON_ID: usize = 1;
 
-const IDC_ENABLED: i32 = 1001;
-const IDC_AUTOSTART: i32 = 1008;
-const IDC_CAPTURE: i32 = 1009;
-const IDC_SAVE: i32 = 1013;
-const IDC_OPEN_HISTORY: i32 = 1014;
-const IDC_CLEAR_HISTORY: i32 = 1015;
-const IDC_STATUS: i32 = 1016;
-const IDC_ENCRYPT_CONTENT: i32 = 1017;
-const IDC_NAV_GENERAL: i32 = 1018;
-const IDC_NAV_HISTORY: i32 = 1019;
-const IDC_OPEN_DATA_DIR: i32 = 1020;
-const IDC_DARK_MODE: i32 = 1021;
-const IDC_TRIGGER_RIGHT: i32 = 1022;
-const IDC_TRIGGER_X1: i32 = 1023;
-const IDC_TRIGGER_X2: i32 = 1024;
-const IDC_NAV_RESOURCES: i32 = 1025;
-
-const IDC_HISTORY_SEARCH: i32 = 1101;
-const IDC_HISTORY_LIST: i32 = 1102;
-const IDC_HISTORY_COPY: i32 = 1103;
-const IDC_HISTORY_DELETE: i32 = 1104;
-const IDC_HISTORY_CLEAR: i32 = 1105;
-
 const TRAY_ID: u32 = 1;
 const IDM_SETTINGS: usize = 2001;
 const IDM_HISTORY: usize = 2002;
 const IDM_PAUSE: usize = 2003;
 const IDM_EXIT: usize = 2004;
-const SS_LEFT_STYLE: u32 = 0;
-const SS_RIGHT_STYLE: u32 = 2;
 const RESOURCE_TIMER_ID: usize = 2;
-const ACCENT_COLOR: COLORREF = rgb(37, 99, 235);
-
-#[derive(Clone, Copy)]
-struct Palette {
-    page: COLORREF,
-    card: COLORREF,
-    border: COLORREF,
-    text: COLORREF,
-    muted: COLORREF,
-    sidebar: COLORREF,
-    hover: COLORREF,
-    selected: COLORREF,
-}
-
-fn palette(dark: bool) -> Palette {
-    if dark {
-        Palette {
-            page: rgb(18, 20, 24),
-            card: rgb(28, 31, 37),
-            border: rgb(52, 57, 66),
-            text: rgb(239, 242, 247),
-            muted: rgb(155, 163, 175),
-            sidebar: rgb(22, 25, 30),
-            hover: rgb(42, 47, 56),
-            selected: rgb(32, 48, 76),
-        }
-    } else {
-        Palette {
-            page: rgb(246, 248, 251),
-            card: rgb(255, 255, 255),
-            border: rgb(225, 229, 236),
-            text: rgb(31, 41, 55),
-            muted: rgb(107, 114, 128),
-            sidebar: rgb(243, 245, 248),
-            hover: rgb(238, 242, 247),
-            selected: rgb(239, 246, 255),
-        }
-    }
-}
-
 static APP_STATE: AtomicPtr<AppState> = AtomicPtr::new(ptr::null_mut());
-
-struct Thumbnail {
-    width: i32,
-    height: i32,
-    bgra: Vec<u8>,
-}
-
-struct HistoryView {
-    item: ClipItem,
-    thumbnail: Option<Thumbnail>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SettingsPage {
-    General,
-    History,
-    Resources,
-}
-
-struct Controls {
-    status: HWND,
-    page_title: HWND,
-    page_subtitle: HWND,
-    nav_general: HWND,
-    nav_history: HWND,
-    nav_resources: HWND,
-    enabled: HWND,
-    dark_mode: HWND,
-    trigger_right: HWND,
-    trigger_x1: HWND,
-    trigger_x2: HWND,
-    autostart: HWND,
-    capture: HWND,
-    encrypt_content: HWND,
-    history_usage: HWND,
-    resource_cpu: HWND,
-    resource_private: HWND,
-    resource_working_set: HWND,
-    resource_gpu: HWND,
-    resource_details: HWND,
-    general_page: Vec<HWND>,
-    history_page: Vec<HWND>,
-    resources_page: Vec<HWND>,
-}
-
-impl Default for Controls {
-    fn default() -> Self {
-        Self {
-            status: ptr::null_mut(),
-            page_title: ptr::null_mut(),
-            page_subtitle: ptr::null_mut(),
-            nav_general: ptr::null_mut(),
-            nav_history: ptr::null_mut(),
-            nav_resources: ptr::null_mut(),
-            enabled: ptr::null_mut(),
-            dark_mode: ptr::null_mut(),
-            trigger_right: ptr::null_mut(),
-            trigger_x1: ptr::null_mut(),
-            trigger_x2: ptr::null_mut(),
-            autostart: ptr::null_mut(),
-            capture: ptr::null_mut(),
-            encrypt_content: ptr::null_mut(),
-            history_usage: ptr::null_mut(),
-            resource_cpu: ptr::null_mut(),
-            resource_private: ptr::null_mut(),
-            resource_working_set: ptr::null_mut(),
-            resource_gpu: ptr::null_mut(),
-            resource_details: ptr::null_mut(),
-            general_page: Vec::new(),
-            history_page: Vec::new(),
-            resources_page: Vec::new(),
-        }
-    }
-}
 
 struct AppState {
     main_hwnd: HWND,
@@ -245,6 +110,10 @@ struct AppState {
     history_search: HWND,
     history_list: HWND,
     history_usage: HWND,
+    history_pin: HWND,
+    history_copy: HWND,
+    history_delete: HWND,
+    history_clear: HWND,
     overlay_hwnd: HWND,
     toast_hwnd: HWND,
     config: Arc<RwLock<AppConfig>>,
@@ -313,6 +182,10 @@ pub fn run() -> Result<()> {
         history_search: ptr::null_mut(),
         history_list: ptr::null_mut(),
         history_usage: ptr::null_mut(),
+        history_pin: ptr::null_mut(),
+        history_copy: ptr::null_mut(),
+        history_delete: ptr::null_mut(),
+        history_clear: ptr::null_mut(),
         overlay_hwnd: ptr::null_mut(),
         toast_hwnd: ptr::null_mut(),
         config,
@@ -509,28 +382,6 @@ fn initialize_common_controls() {
     }
 }
 
-fn create_ui_font(height: i32, weight: i32) -> HFONT {
-    let face = wide("Microsoft YaHei UI");
-    unsafe {
-        CreateFontW(
-            height,
-            0,
-            0,
-            0,
-            weight,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET as u32,
-            0,
-            0,
-            CLEARTYPE_QUALITY as u32,
-            (DEFAULT_PITCH | FF_DONTCARE) as u32,
-            face.as_ptr(),
-        )
-    }
-}
-
 fn register_classes() -> Result<()> {
     let instance = unsafe { GetModuleHandleW(ptr::null()) } as HINSTANCE;
     let app_icon = load_app_icon(instance);
@@ -722,7 +573,16 @@ unsafe extern "system" fn main_proc(
         WM_CREATE => {
             if let Some(state) = state_mut() {
                 state.main_hwnd = hwnd;
-                create_settings_controls(state);
+                state.controls = settings::create_controls(
+                    hwnd,
+                    SettingsFonts {
+                        body: state.font_body,
+                        section: state.font_section,
+                        title: state.font_title,
+                    },
+                );
+                refresh_history_usage(state);
+                show_settings_page(state, SettingsPage::General);
                 load_config_into_controls(state);
                 refresh_theme_resources(state);
                 if unsafe { AddClipboardFormatListener(hwnd) } == 0 {
@@ -948,101 +808,22 @@ unsafe extern "system" fn history_proc(
         WM_CREATE => {
             if let Some(state) = state_mut() {
                 state.history_hwnd = hwnd;
-                let title = label(hwnd, "剪贴板历史", 24, 16, 300, 42);
-                set_control_font(title, state.font_title);
-                let subtitle = label(hwnd, "搜索并复制", 25, 60, 240, 24);
-                set_control_font(subtitle, state.font_body);
-                let usage = create_control(
+                let controls = history_popup::create_controls(
                     hwnd,
-                    "STATIC",
-                    "",
-                    WS_CHILD | WS_VISIBLE | SS_RIGHT_STYLE,
-                    0,
-                    338,
-                    28,
-                    258,
-                    24,
-                    0,
+                    SettingsFonts {
+                        body: state.font_body,
+                        section: state.font_section,
+                        title: state.font_title,
+                    },
+                    state.dark_mode,
                 );
-                let search = create_control(
-                    hwnd,
-                    "EDIT",
-                    "",
-                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL as u32,
-                    0,
-                    24,
-                    98,
-                    572,
-                    38,
-                    IDC_HISTORY_SEARCH,
-                );
-                let list = create_control(
-                    hwnd,
-                    "LISTBOX",
-                    "",
-                    WS_CHILD
-                        | WS_VISIBLE
-                        | WS_TABSTOP
-                        | WS_VSCROLL
-                        | LBS_NOTIFY as u32
-                        | LBS_NOINTEGRALHEIGHT as u32
-                        | LBS_OWNERDRAWFIXED as u32
-                        | LBS_HASSTRINGS as u32,
-                    0,
-                    24,
-                    150,
-                    572,
-                    326,
-                    IDC_HISTORY_LIST,
-                );
-                create_control(
-                    hwnd,
-                    "BUTTON",
-                    "复制",
-                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
-                    0,
-                    334,
-                    490,
-                    82,
-                    38,
-                    IDC_HISTORY_COPY,
-                );
-                create_control(
-                    hwnd,
-                    "BUTTON",
-                    "删除",
-                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
-                    0,
-                    424,
-                    490,
-                    78,
-                    38,
-                    IDC_HISTORY_DELETE,
-                );
-                create_control(
-                    hwnd,
-                    "BUTTON",
-                    "清空",
-                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
-                    0,
-                    510,
-                    490,
-                    82,
-                    38,
-                    IDC_HISTORY_CLEAR,
-                );
-                state.history_search = search;
-                state.history_list = list;
-                state.history_usage = usage;
-                round_control(search, 572, 38, 16);
-                round_control(list, 572, 326, 14);
-                unsafe {
-                    SendMessageW(list, LB_SETITEMHEIGHT, 0, 64);
-                    let cue = wide("搜索剪贴板内容或来源程序");
-                    SendMessageW(search, 0x1501, 1, cue.as_ptr() as LPARAM);
-                }
-                apply_child_theme(search, state.dark_mode);
-                apply_child_theme(list, state.dark_mode);
+                state.history_search = controls.search;
+                state.history_list = controls.list;
+                state.history_usage = controls.usage;
+                state.history_pin = controls.pin;
+                state.history_copy = controls.copy;
+                state.history_delete = controls.delete;
+                state.history_clear = controls.clear;
             }
             0
         }
@@ -1058,6 +839,10 @@ unsafe extern "system" fn history_proc(
                     IDC_HISTORY_LIST if notification == LBN_DBLCLK as u16 => {
                         copy_selected_history(state)
                     }
+                    IDC_HISTORY_LIST if notification == LBN_SELCHANGE as u16 => {
+                        refresh_pin_button(state)
+                    }
+                    IDC_HISTORY_PIN => toggle_selected_history_pin(state),
                     IDC_HISTORY_COPY => copy_selected_history(state),
                     IDC_HISTORY_DELETE => delete_selected_history(state),
                     IDC_HISTORY_CLEAR => confirm_clear_history(state),
@@ -1073,7 +858,7 @@ unsafe extern "system" fn history_proc(
                 1
             } else if matches!(
                 draw.CtlID as i32,
-                IDC_HISTORY_COPY | IDC_HISTORY_DELETE | IDC_HISTORY_CLEAR
+                IDC_HISTORY_PIN | IDC_HISTORY_COPY | IDC_HISTORY_DELETE | IDC_HISTORY_CLEAR
             ) {
                 draw_button(draw);
                 1
@@ -1223,323 +1008,6 @@ unsafe extern "system" fn toast_proc(
     }
 }
 
-fn create_settings_controls(state: &mut AppState) {
-    let hwnd = state.main_hwnd;
-    let brand = label(hwnd, "Xmouse", 72, 24, 112, 30);
-    set_control_font(brand, state.font_section);
-    label(hwnd, "轻量效率工具", 72, 54, 112, 22);
-
-    state.controls.nav_general = create_control(
-        hwnd,
-        "BUTTON",
-        "常规",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
-        0,
-        14,
-        104,
-        162,
-        42,
-        IDC_NAV_GENERAL,
-    );
-    state.controls.nav_history = create_control(
-        hwnd,
-        "BUTTON",
-        "剪贴板历史",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
-        0,
-        14,
-        154,
-        162,
-        42,
-        IDC_NAV_HISTORY,
-    );
-    state.controls.nav_resources = create_control(
-        hwnd,
-        "BUTTON",
-        "资源占用",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
-        0,
-        14,
-        204,
-        162,
-        42,
-        IDC_NAV_RESOURCES,
-    );
-    label(hwnd, "v0.4.0", 22, 636, 120, 22);
-
-    state.controls.page_title = label(hwnd, "常规", 220, 24, 300, 34);
-    set_control_font(state.controls.page_title, state.font_title);
-    state.controls.page_subtitle = label(hwnd, "手势与启动", 221, 58, 440, 22);
-    state.controls.status = create_control(
-        hwnd,
-        "BUTTON",
-        "运行中",
-        WS_CHILD | WS_VISIBLE | BS_OWNERDRAW as u32,
-        0,
-        758,
-        27,
-        104,
-        32,
-        IDC_STATUS,
-    );
-
-    let mut general_page = Vec::new();
-    let mut history_page = Vec::new();
-    let mut resources_page = Vec::new();
-
-    let startup_title = label(hwnd, "基础", 232, 116, 160, 26);
-    set_control_font(startup_title, state.font_section);
-    general_page.push(startup_title);
-    state.controls.enabled = create_control(
-        hwnd,
-        "BUTTON",
-        "启用鼠标手势",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
-        0,
-        232,
-        150,
-        270,
-        34,
-        IDC_ENABLED,
-    );
-    general_page.push(state.controls.enabled);
-    state.controls.autostart = create_control(
-        hwnd,
-        "BUTTON",
-        "开机自动启动",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
-        0,
-        530,
-        150,
-        270,
-        34,
-        IDC_AUTOSTART,
-    );
-    general_page.push(state.controls.autostart);
-    state.controls.dark_mode = create_control(
-        hwnd,
-        "BUTTON",
-        "深色模式",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
-        0,
-        232,
-        194,
-        270,
-        34,
-        IDC_DARK_MODE,
-    );
-    general_page.push(state.controls.dark_mode);
-
-    let trigger_title = label(hwnd, "触发键", 232, 276, 220, 26);
-    set_control_font(trigger_title, state.font_section);
-    general_page.push(trigger_title);
-    state.controls.trigger_right = create_control(
-        hwnd,
-        "BUTTON",
-        "鼠标右键",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
-        0,
-        232,
-        314,
-        112,
-        40,
-        IDC_TRIGGER_RIGHT,
-    );
-    general_page.push(state.controls.trigger_right);
-    state.controls.trigger_x1 = create_control(
-        hwnd,
-        "BUTTON",
-        "侧键 X1",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
-        0,
-        354,
-        314,
-        112,
-        40,
-        IDC_TRIGGER_X1,
-    );
-    general_page.push(state.controls.trigger_x1);
-    state.controls.trigger_x2 = create_control(
-        hwnd,
-        "BUTTON",
-        "侧键 X2",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
-        0,
-        476,
-        314,
-        112,
-        40,
-        IDC_TRIGGER_X2,
-    );
-    general_page.push(state.controls.trigger_x2);
-    general_page.push(label(hwnd, "Edge 冲突时请使用侧键", 614, 323, 210, 22));
-
-    let mapping_title = label(hwnd, "快捷手势", 232, 410, 160, 26);
-    set_control_font(mapping_title, state.font_section);
-    general_page.push(mapping_title);
-    general_page.push(label(
-        hwnd,
-        "↑  置顶窗口        L  关闭页面        S  搜索选中内容",
-        232,
-        452,
-        590,
-        26,
-    ));
-    general_page.push(label(
-        hwnd,
-        "C  复制内容        V  打开剪贴板历史",
-        232,
-        492,
-        590,
-        24,
-    ));
-
-    state.controls.history_usage = create_control(
-        hwnd,
-        "STATIC",
-        "",
-        WS_CHILD | WS_VISIBLE | SS_RIGHT_STYLE,
-        0,
-        566,
-        34,
-        274,
-        24,
-        0,
-    );
-    history_page.push(state.controls.history_usage);
-
-    let history_title = label(hwnd, "记录", 232, 116, 160, 26);
-    set_control_font(history_title, state.font_section);
-    history_page.push(history_title);
-    state.controls.capture = create_control(
-        hwnd,
-        "BUTTON",
-        "记录文本和图片",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
-        0,
-        232,
-        150,
-        270,
-        34,
-        IDC_CAPTURE,
-    );
-    history_page.push(state.controls.capture);
-    state.controls.encrypt_content = create_control(
-        hwnd,
-        "BUTTON",
-        "本机加密",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
-        0,
-        530,
-        150,
-        270,
-        34,
-        IDC_ENCRYPT_CONTENT,
-    );
-    history_page.push(state.controls.encrypt_content);
-
-    let actions_title = label(hwnd, "管理", 232, 260, 160, 26);
-    set_control_font(actions_title, state.font_section);
-    history_page.push(actions_title);
-    let open_history = create_control(
-        hwnd,
-        "BUTTON",
-        "打开历史",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
-        0,
-        232,
-        304,
-        128,
-        40,
-        IDC_OPEN_HISTORY,
-    );
-    history_page.push(open_history);
-    let clear_history = create_control(
-        hwnd,
-        "BUTTON",
-        "清空历史",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
-        0,
-        372,
-        304,
-        128,
-        40,
-        IDC_CLEAR_HISTORY,
-    );
-    history_page.push(clear_history);
-    let open_data = create_control(
-        hwnd,
-        "BUTTON",
-        "打开数据目录",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
-        0,
-        512,
-        304,
-        138,
-        40,
-        IDC_OPEN_DATA_DIR,
-    );
-    history_page.push(open_data);
-    history_page.push(label(
-        hwnd,
-        "按 V 可在光标附近快速打开历史",
-        232,
-        376,
-        420,
-        22,
-    ));
-
-    let cpu_title = label(hwnd, "CPU", 232, 124, 120, 24);
-    resources_page.push(cpu_title);
-    state.controls.resource_cpu = label(hwnd, "0.00%", 232, 154, 250, 44);
-    set_control_font(state.controls.resource_cpu, state.font_title);
-    resources_page.push(state.controls.resource_cpu);
-
-    let gpu_title = label(hwnd, "GPU", 554, 124, 120, 24);
-    resources_page.push(gpu_title);
-    state.controls.resource_gpu = label(hwnd, "0%", 554, 154, 250, 44);
-    set_control_font(state.controls.resource_gpu, state.font_title);
-    resources_page.push(state.controls.resource_gpu);
-    resources_page.push(label(hwnd, "GDI 软件绘制", 554, 202, 220, 22));
-
-    let private_title = label(hwnd, "私有内存", 232, 286, 160, 24);
-    resources_page.push(private_title);
-    state.controls.resource_private = label(hwnd, "0 MiB", 232, 316, 250, 44);
-    set_control_font(state.controls.resource_private, state.font_title);
-    resources_page.push(state.controls.resource_private);
-
-    let working_title = label(hwnd, "工作集", 554, 286, 160, 24);
-    resources_page.push(working_title);
-    state.controls.resource_working_set = label(hwnd, "0 MiB", 554, 316, 250, 44);
-    set_control_font(state.controls.resource_working_set, state.font_title);
-    resources_page.push(state.controls.resource_working_set);
-
-    let details_title = label(hwnd, "进程", 232, 452, 160, 24);
-    set_control_font(details_title, state.font_section);
-    resources_page.push(details_title);
-    state.controls.resource_details = label(hwnd, "", 232, 490, 580, 56);
-    resources_page.push(state.controls.resource_details);
-
-    create_control(
-        hwnd,
-        "BUTTON",
-        "保存设置",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
-        0,
-        734,
-        625,
-        128,
-        40,
-        IDC_SAVE,
-    );
-
-    state.controls.general_page = general_page;
-    state.controls.history_page = history_page;
-    state.controls.resources_page = resources_page;
-    refresh_history_usage(state);
-    show_settings_page(state, SettingsPage::General);
-}
-
 fn show_settings_page(state: &mut AppState, page: SettingsPage) {
     state.active_settings_page = page;
     for &control in &state.controls.general_page {
@@ -1608,78 +1076,6 @@ fn show_settings_page(state: &mut AppState, page: SettingsPage) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn create_control(
-    parent: HWND,
-    class: &str,
-    text: &str,
-    style: WINDOW_STYLE,
-    ex_style: WINDOW_EX_STYLE,
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-    id: i32,
-) -> HWND {
-    let class = wide(class);
-    let text = wide(text);
-    let instance = unsafe { GetModuleHandleW(ptr::null()) } as HINSTANCE;
-    let control = unsafe {
-        CreateWindowExW(
-            ex_style,
-            class.as_ptr(),
-            text.as_ptr(),
-            style,
-            x,
-            y,
-            width,
-            height,
-            parent,
-            id as usize as HMENU,
-            instance,
-            ptr::null(),
-        )
-    };
-    if !control.is_null()
-        && let Some(state) = state_mut()
-    {
-        set_control_font(control, state.font_body);
-    }
-    control
-}
-
-fn set_control_font(control: HWND, font: HFONT) {
-    if !control.is_null() && !font.is_null() {
-        unsafe {
-            SendMessageW(control, WM_SETFONT, font as WPARAM, 1);
-        }
-    }
-}
-
-fn label(parent: HWND, text: &str, x: i32, y: i32, width: i32, height: i32) -> HWND {
-    create_control(
-        parent,
-        "STATIC",
-        text,
-        WS_CHILD | WS_VISIBLE | SS_LEFT_STYLE,
-        0,
-        x,
-        y,
-        width,
-        height,
-        0,
-    )
-}
-
-fn round_control(control: HWND, width: i32, height: i32, radius: i32) {
-    if control.is_null() {
-        return;
-    }
-    let region = unsafe { CreateRoundRectRgn(0, 0, width + 1, height + 1, radius * 2, radius * 2) };
-    unsafe {
-        SetWindowRgn(control, region, 1);
-    }
-}
-
 fn load_config_into_controls(state: &mut AppState) {
     let config = state.config.read().expect("config poisoned").clone();
     state.dark_mode = config.dark_mode;
@@ -1763,17 +1159,6 @@ fn refresh_resource_usage(state: &mut AppState) {
     );
 }
 
-fn format_uptime(duration: std::time::Duration) -> String {
-    let seconds = duration.as_secs();
-    if seconds >= 3_600 {
-        format!("{} 小时 {} 分", seconds / 3_600, seconds % 3_600 / 60)
-    } else if seconds >= 60 {
-        format!("{} 分 {} 秒", seconds / 60, seconds % 60)
-    } else {
-        format!("{seconds} 秒")
-    }
-}
-
 fn refresh_theme_resources(state: &mut AppState) {
     let colors = palette(state.dark_mode);
     unsafe {
@@ -1816,35 +1201,6 @@ fn refresh_theme_resources(state: &mut AppState) {
                 InvalidateRect(control, ptr::null(), 1);
             }
         }
-    }
-}
-
-fn apply_window_theme(hwnd: HWND, dark: bool) {
-    if hwnd.is_null() {
-        return;
-    }
-    let enabled = i32::from(dark);
-    unsafe {
-        DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
-            &enabled as *const i32 as *const c_void,
-            mem::size_of::<i32>() as u32,
-        );
-    }
-}
-
-fn apply_child_theme(hwnd: HWND, dark: bool) {
-    if hwnd.is_null() {
-        return;
-    }
-    let theme = wide(if dark {
-        "DarkMode_Explorer"
-    } else {
-        "Explorer"
-    });
-    unsafe {
-        SetWindowTheme(hwnd, theme.as_ptr(), ptr::null());
     }
 }
 
@@ -1934,15 +1290,13 @@ fn hide_history(state: &mut AppState) {
 }
 
 fn rebuild_history(state: &mut AppState, query: &str) {
+    rebuild_history_with_selection(state, query, None);
+}
+
+fn rebuild_history_with_selection(state: &mut AppState, query: &str, selected_id: Option<i64>) {
     match state.storage.list(query) {
         Ok(items) => {
-            state.history_items = items
-                .into_iter()
-                .map(|item| {
-                    let thumbnail = item.thumbnail_png.as_deref().and_then(decode_thumbnail);
-                    HistoryView { item, thumbnail }
-                })
-                .collect();
+            state.history_items = items.into_iter().map(HistoryView::new).collect();
             unsafe {
                 SendMessageW(state.history_list, LB_RESETCONTENT, 0, 0);
             }
@@ -1953,10 +1307,19 @@ fn rebuild_history(state: &mut AppState, query: &str) {
                 }
             }
             if !state.history_items.is_empty() {
+                let selected_index = selected_id
+                    .and_then(|id| {
+                        state
+                            .history_items
+                            .iter()
+                            .position(|view| view.item.id == id)
+                    })
+                    .unwrap_or(0);
                 unsafe {
-                    SendMessageW(state.history_list, LB_SETCURSEL, 0, 0);
+                    SendMessageW(state.history_list, LB_SETCURSEL, selected_index, 0);
                 }
             }
+            refresh_pin_button(state);
             refresh_history_usage(state);
         }
         Err(error) => post_toast(
@@ -1993,11 +1356,74 @@ fn copy_selected_history(state: &mut AppState) {
     }
 }
 
+fn toggle_selected_history_pin(state: &mut AppState) {
+    let Some(index) = selected_history_index(state) else {
+        return;
+    };
+    let item = &state.history_items[index].item;
+    let id = item.id;
+    let pinned = !item.pinned;
+    match state.storage.set_pinned(id, pinned) {
+        Ok(()) => {
+            let query = window_text(state.history_search);
+            rebuild_history_with_selection(state, &query, Some(id));
+            post_toast(
+                state.main_hwnd as isize,
+                if pinned {
+                    "已置顶"
+                } else {
+                    "已取消置顶"
+                },
+            );
+        }
+        Err(error) => post_toast(
+            state.main_hwnd as isize,
+            &format!("更新置顶状态失败：{error:#}"),
+        ),
+    }
+}
+
+fn refresh_pin_button(state: &AppState) {
+    let selected = selected_history_index(state);
+    let pinned = selected
+        .and_then(|index| state.history_items.get(index))
+        .is_some_and(|view| view.item.pinned);
+    set_control_text(state.history_pin, if pinned { "取消置顶" } else { "置顶" });
+    let has_selection = selected.is_some();
+    let has_items = state
+        .storage
+        .stats()
+        .is_ok_and(|stats| stats.item_count > 0);
+    unsafe {
+        EnableWindow(state.history_pin, has_selection as i32);
+        EnableWindow(state.history_copy, has_selection as i32);
+        EnableWindow(state.history_delete, has_selection as i32);
+        EnableWindow(state.history_clear, has_items as i32);
+        InvalidateRect(state.history_pin, ptr::null(), 1);
+    }
+}
+
 fn delete_selected_history(state: &mut AppState) {
     let Some(index) = selected_history_index(state) else {
         return;
     };
-    let id = state.history_items[index].item.id;
+    let item = &state.history_items[index].item;
+    if item.pinned {
+        let text = wide("这条记录已置顶，仍要删除吗？");
+        let title = wide("Xmouse");
+        if unsafe {
+            MessageBoxW(
+                state.history_hwnd,
+                text.as_ptr(),
+                title.as_ptr(),
+                MB_YESNO | MB_ICONQUESTION,
+            )
+        } != IDYES
+        {
+            return;
+        }
+    }
+    let id = item.id;
     match state.storage.remove(id) {
         Ok(()) => {
             let query = window_text(state.history_search);
@@ -2011,7 +1437,15 @@ fn delete_selected_history(state: &mut AppState) {
 }
 
 fn confirm_clear_history(state: &mut AppState) {
-    let text = wide("确定删除全部剪贴板历史吗？");
+    let includes_pinned = state
+        .storage
+        .stats()
+        .is_ok_and(|stats| stats.pinned_count > 0);
+    let text = wide(if includes_pinned {
+        "确定删除全部剪贴板历史吗？这也会删除置顶记录。"
+    } else {
+        "确定删除全部剪贴板历史吗？"
+    });
     let title = wide("Xmouse");
     let answer = unsafe {
         MessageBoxW(
@@ -2028,6 +1462,7 @@ fn confirm_clear_history(state: &mut AppState) {
                 unsafe {
                     SendMessageW(state.history_list, LB_RESETCONTENT, 0, 0);
                 }
+                refresh_pin_button(state);
                 refresh_history_usage(state);
                 post_toast(state.main_hwnd as isize, "剪贴板历史已清空");
             }
@@ -2045,21 +1480,18 @@ fn refresh_history_usage(state: &AppState) {
     } else {
         stats.content_bytes
     };
-    let text = format!("{} 条 · {}", stats.item_count, format_bytes(bytes));
+    let text = if stats.pinned_count > 0 {
+        format!(
+            "{} 条 · {} 置顶 · {}",
+            stats.item_count,
+            stats.pinned_count,
+            format_bytes(bytes)
+        )
+    } else {
+        format!("{} 条 · {}", stats.item_count, format_bytes(bytes))
+    };
     set_control_text(state.controls.history_usage, &text);
     set_control_text(state.history_usage, &text);
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const KIB: f64 = 1024.0;
-    const MIB: f64 = KIB * 1024.0;
-    if bytes >= MIB as u64 {
-        format!("{:.1} MiB", bytes as f64 / MIB)
-    } else if bytes >= KIB as u64 {
-        format!("{:.0} KiB", bytes as f64 / KIB)
-    } else {
-        format!("{bytes} B")
-    }
 }
 
 fn open_data_directory(state: &AppState) {
@@ -2138,7 +1570,7 @@ fn paint_main_window(hwnd: HWND) {
         ],
     };
     for &(left, top, right, bottom, radius) in cards {
-        draw_rounded_panel(hdc, left, top, right, bottom, radius, colors);
+        widgets::rounded_panel(hdc, left, top, right, bottom, radius, colors);
     }
 
     let logo_brush = unsafe { CreateSolidBrush(ACCENT_COLOR) };
@@ -2191,342 +1623,82 @@ fn paint_history_window(hwnd: HWND) {
         FillRect(hdc, &client, page);
         DeleteObject(page);
     }
-    draw_rounded_panel(hdc, 16, 88, 604, 144, 18, colors);
-    draw_rounded_panel(hdc, 23, 97, 597, 138, 30, colors);
-    draw_rounded_panel(hdc, 16, 142, 604, 484, 18, colors);
-    draw_rounded_panel(hdc, 23, 149, 597, 477, 24, colors);
+    widgets::rounded_panel(hdc, 16, 88, 604, 144, 18, colors);
+    widgets::rounded_panel(hdc, 23, 97, 597, 138, 30, colors);
+    widgets::rounded_panel(hdc, 16, 142, 604, 484, 18, colors);
+    widgets::rounded_panel(hdc, 23, 149, 597, 477, 24, colors);
     unsafe {
         EndPaint(hwnd, &paint);
     }
 }
 
-fn draw_rounded_panel(
-    hdc: *mut c_void,
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
-    radius: i32,
-    colors: Palette,
-) {
-    let brush = unsafe { CreateSolidBrush(colors.card) };
-    let pen = unsafe { CreatePen(PS_SOLID, 1, colors.border) };
-    let old_brush = unsafe { SelectObject(hdc, brush) };
-    let old_pen = unsafe { SelectObject(hdc, pen) };
-    unsafe {
-        RoundRect(hdc, left, top, right, bottom, radius, radius);
-        SelectObject(hdc, old_brush);
-        SelectObject(hdc, old_pen);
-        DeleteObject(brush);
-        DeleteObject(pen);
-    }
-}
-
 fn draw_button(draw: &DRAWITEMSTRUCT) {
+    let Some(state) = state_mut() else {
+        return;
+    };
     let id = draw.CtlID as i32;
-    let pressed = draw.itemState & ODS_SELECTED != 0;
-    let (enabled, active_page, dark_mode) = state_mut()
-        .map(|state| {
-            (
-                state.config.read().expect("config poisoned").enabled,
-                state.active_settings_page,
-                state.dark_mode,
-            )
-        })
-        .unwrap_or((true, SettingsPage::General, false));
-    let colors = palette(dark_mode);
+    let colors = palette(state.dark_mode);
+    let enabled = state.config.read().expect("config poisoned").enabled;
     let nav_active = matches!(
-        (id, active_page),
+        (id, state.active_settings_page),
         (IDC_NAV_GENERAL, SettingsPage::General)
             | (IDC_NAV_HISTORY, SettingsPage::History)
             | (IDC_NAV_RESOURCES, SettingsPage::Resources)
     );
+    let role = if id == IDC_STATUS {
+        ButtonRole::Status { enabled }
+    } else if matches!(id, IDC_NAV_GENERAL | IDC_NAV_HISTORY | IDC_NAV_RESOURCES) {
+        ButtonRole::Navigation { active: nav_active }
+    } else if matches!(id, IDC_SAVE | IDC_HISTORY_COPY) {
+        ButtonRole::Primary
+    } else if matches!(
+        id,
+        IDC_CLEAR_HISTORY | IDC_HISTORY_DELETE | IDC_HISTORY_CLEAR
+    ) {
+        ButtonRole::Danger
+    } else {
+        ButtonRole::Secondary
+    };
     let corner_color = if matches!(id, IDC_NAV_GENERAL | IDC_NAV_HISTORY | IDC_NAV_RESOURCES) {
         colors.sidebar
     } else if matches!(
         id,
-        IDC_SAVE | IDC_STATUS | IDC_HISTORY_COPY | IDC_HISTORY_DELETE | IDC_HISTORY_CLEAR
+        IDC_SAVE
+            | IDC_STATUS
+            | IDC_HISTORY_PIN
+            | IDC_HISTORY_COPY
+            | IDC_HISTORY_DELETE
+            | IDC_HISTORY_CLEAR
     ) {
         colors.page
     } else {
         colors.card
     };
-    let corner_brush = unsafe { CreateSolidBrush(corner_color) };
-    unsafe {
-        FillRect(draw.hDC, &draw.rcItem, corner_brush);
-        DeleteObject(corner_brush);
-    }
-    let (fill, border, text_color, radius) = if id == IDC_STATUS {
-        if enabled {
-            (rgb(231, 248, 239), rgb(191, 229, 207), rgb(22, 125, 74), 16)
-        } else {
-            (
-                rgb(255, 247, 225),
-                rgb(244, 218, 151),
-                rgb(164, 104, 16),
-                16,
-            )
-        }
-    } else if matches!(id, IDC_NAV_GENERAL | IDC_NAV_HISTORY | IDC_NAV_RESOURCES) {
-        (
-            if nav_active {
-                colors.selected
-            } else if pressed {
-                colors.hover
-            } else {
-                colors.sidebar
-            },
-            if nav_active {
-                colors.selected
-            } else {
-                colors.sidebar
-            },
-            if nav_active {
-                ACCENT_COLOR
-            } else {
-                colors.text
-            },
-            10,
-        )
-    } else if matches!(id, IDC_SAVE | IDC_HISTORY_COPY) {
-        (
-            if pressed {
-                rgb(29, 78, 216)
-            } else {
-                ACCENT_COLOR
-            },
-            if pressed {
-                rgb(29, 78, 216)
-            } else {
-                ACCENT_COLOR
-            },
-            rgb(255, 255, 255),
-            10,
-        )
-    } else {
-        (
-            if pressed { colors.hover } else { colors.card },
-            colors.border,
-            if matches!(
-                id,
-                IDC_CLEAR_HISTORY | IDC_HISTORY_DELETE | IDC_HISTORY_CLEAR
-            ) {
-                rgb(190, 45, 55)
-            } else {
-                colors.text
-            },
-            10,
-        )
-    };
-
-    let brush = unsafe { CreateSolidBrush(fill) };
-    let pen = unsafe { CreatePen(PS_SOLID, 1, border) };
-    let old_brush = unsafe { SelectObject(draw.hDC, brush) };
-    let old_pen = unsafe { SelectObject(draw.hDC, pen) };
-    unsafe {
-        RoundRect(
-            draw.hDC,
-            draw.rcItem.left,
-            draw.rcItem.top,
-            draw.rcItem.right - 1,
-            draw.rcItem.bottom - 1,
-            radius,
-            radius,
-        );
-        SelectObject(draw.hDC, old_brush);
-        SelectObject(draw.hDC, old_pen);
-        DeleteObject(brush);
-        DeleteObject(pen);
-        SetBkMode(draw.hDC, TRANSPARENT as i32);
-        SetTextColor(draw.hDC, text_color);
-    }
-    if nav_active {
-        let accent = unsafe { CreateSolidBrush(ACCENT_COLOR) };
-        let marker = RECT {
-            left: draw.rcItem.left + 1,
-            top: draw.rcItem.top + 9,
-            right: draw.rcItem.left + 4,
-            bottom: draw.rcItem.bottom - 9,
-        };
-        unsafe {
-            FillRect(draw.hDC, &marker, accent);
-            DeleteObject(accent);
-        }
-    }
-
-    let text = wide(&window_text(draw.hwndItem));
-    let mut text_rect = draw.rcItem;
-    let text_flags = if matches!(id, IDC_NAV_GENERAL | IDC_NAV_HISTORY | IDC_NAV_RESOURCES) {
-        text_rect.left += 20;
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS
-    } else {
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS
-    };
-    if pressed && id != IDC_STATUS {
-        text_rect.top += 1;
-    }
-    if let Some(state) = state_mut() {
-        let old_font = unsafe { SelectObject(draw.hDC, state.font_body) };
-        unsafe {
-            DrawTextW(draw.hDC, text.as_ptr(), -1, &mut text_rect, text_flags);
-            SelectObject(draw.hDC, old_font);
-        }
-    }
+    widgets::draw_button(draw, colors, state.font_body, role, corner_color);
 }
 
 fn draw_toggle(draw: &DRAWITEMSTRUCT) {
     let Some(state) = state_mut() else {
         return;
     };
-    let colors = palette(state.dark_mode);
-    let checked = is_checked(draw.hwndItem);
-    let background = unsafe { CreateSolidBrush(colors.card) };
-    unsafe {
-        FillRect(draw.hDC, &draw.rcItem, background);
-        DeleteObject(background);
-        SetBkMode(draw.hDC, TRANSPARENT as i32);
-        SetTextColor(draw.hDC, colors.text);
-    }
-
-    let track = RECT {
-        left: draw.rcItem.right - 48,
-        top: draw.rcItem.top + (draw.rcItem.bottom - draw.rcItem.top - 22) / 2,
-        right: draw.rcItem.right - 4,
-        bottom: draw.rcItem.top + (draw.rcItem.bottom - draw.rcItem.top + 22) / 2,
-    };
-    let track_color = if checked { ACCENT_COLOR } else { colors.hover };
-    let track_brush = unsafe { CreateSolidBrush(track_color) };
-    let track_pen = unsafe {
-        CreatePen(
-            PS_SOLID,
-            1,
-            if checked { ACCENT_COLOR } else { colors.border },
-        )
-    };
-    let old_brush = unsafe { SelectObject(draw.hDC, track_brush) };
-    let old_pen = unsafe { SelectObject(draw.hDC, track_pen) };
-    unsafe {
-        RoundRect(
-            draw.hDC,
-            track.left,
-            track.top,
-            track.right,
-            track.bottom,
-            22,
-            22,
-        );
-    }
-    let thumb_left = if checked {
-        track.right - 19
-    } else {
-        track.left + 3
-    };
-    let thumb_brush = unsafe {
-        CreateSolidBrush(if checked {
-            rgb(255, 255, 255)
-        } else {
-            colors.muted
-        })
-    };
-    unsafe {
-        SelectObject(draw.hDC, thumb_brush);
-        Ellipse(
-            draw.hDC,
-            thumb_left,
-            track.top + 3,
-            thumb_left + 16,
-            track.top + 19,
-        );
-        SelectObject(draw.hDC, old_brush);
-        SelectObject(draw.hDC, old_pen);
-        DeleteObject(thumb_brush);
-        DeleteObject(track_brush);
-        DeleteObject(track_pen);
-    }
-
-    let text = wide(&window_text(draw.hwndItem));
-    let mut text_rect = RECT {
-        left: draw.rcItem.left,
-        top: draw.rcItem.top,
-        right: track.left - 12,
-        bottom: draw.rcItem.bottom,
-    };
-    let old_font = unsafe { SelectObject(draw.hDC, state.font_body) };
-    unsafe {
-        DrawTextW(
-            draw.hDC,
-            text.as_ptr(),
-            -1,
-            &mut text_rect,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-        );
-        SelectObject(draw.hDC, old_font);
-    }
+    widgets::draw_toggle(
+        draw,
+        palette(state.dark_mode),
+        state.font_body,
+        is_checked(draw.hwndItem),
+    );
 }
 
 fn draw_choice(draw: &DRAWITEMSTRUCT) {
     let Some(state) = state_mut() else {
         return;
     };
-    let colors = palette(state.dark_mode);
-    let selected = is_checked(draw.hwndItem);
-    let pressed = draw.itemState & ODS_SELECTED != 0;
-    let fill = if selected {
-        ACCENT_COLOR
-    } else if pressed {
-        colors.hover
-    } else {
-        colors.card
-    };
-    let border = if selected {
-        ACCENT_COLOR
-    } else {
-        colors.border
-    };
-    let text_color = if selected {
-        rgb(255, 255, 255)
-    } else {
-        colors.text
-    };
-    let corner_brush = unsafe { CreateSolidBrush(colors.card) };
-    unsafe {
-        FillRect(draw.hDC, &draw.rcItem, corner_brush);
-        DeleteObject(corner_brush);
-    }
-    let brush = unsafe { CreateSolidBrush(fill) };
-    let pen = unsafe { CreatePen(PS_SOLID, 1, border) };
-    let old_brush = unsafe { SelectObject(draw.hDC, brush) };
-    let old_pen = unsafe { SelectObject(draw.hDC, pen) };
-    unsafe {
-        RoundRect(
-            draw.hDC,
-            draw.rcItem.left,
-            draw.rcItem.top,
-            draw.rcItem.right - 1,
-            draw.rcItem.bottom - 1,
-            14,
-            14,
-        );
-        SelectObject(draw.hDC, old_brush);
-        SelectObject(draw.hDC, old_pen);
-        DeleteObject(brush);
-        DeleteObject(pen);
-        SetBkMode(draw.hDC, TRANSPARENT as i32);
-        SetTextColor(draw.hDC, text_color);
-    }
-    let text = wide(&window_text(draw.hwndItem));
-    let mut rect = draw.rcItem;
-    let old_font = unsafe { SelectObject(draw.hDC, state.font_body) };
-    unsafe {
-        DrawTextW(
-            draw.hDC,
-            text.as_ptr(),
-            -1,
-            &mut rect,
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-        );
-        SelectObject(draw.hDC, old_font);
-    }
+    widgets::draw_choice(
+        draw,
+        palette(state.dark_mode),
+        state.font_body,
+        is_checked(draw.hwndItem),
+    );
 }
 
 fn draw_history_item(draw: &DRAWITEMSTRUCT) {
@@ -2539,142 +1711,7 @@ fn draw_history_item(draw: &DRAWITEMSTRUCT) {
     let Some(view) = state.history_items.get(draw.itemID as usize) else {
         return;
     };
-    let colors = palette(state.dark_mode);
-    let selected = draw.itemState & ODS_SELECTED != 0;
-    let background_color = if selected {
-        colors.selected
-    } else {
-        colors.card
-    };
-    let brush = unsafe { CreateSolidBrush(background_color) };
-    unsafe {
-        FillRect(draw.hDC, &draw.rcItem, brush);
-        DeleteObject(brush);
-        SetBkMode(draw.hDC, TRANSPARENT as i32);
-        SetTextColor(draw.hDC, colors.text);
-    }
-    if selected {
-        let accent = unsafe { CreateSolidBrush(ACCENT_COLOR) };
-        let stripe = RECT {
-            left: draw.rcItem.left,
-            top: draw.rcItem.top + 6,
-            right: draw.rcItem.left + 3,
-            bottom: draw.rcItem.bottom - 6,
-        };
-        unsafe {
-            FillRect(draw.hDC, &stripe, accent);
-            DeleteObject(accent);
-        }
-    }
-
-    let image_left = draw.rcItem.left + 10;
-    let content_left = if let Some(thumbnail) = &view.thumbnail {
-        let info = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: thumbnail.width,
-                biHeight: -thumbnail.height,
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: 0,
-                biSizeImage: 0,
-                biXPelsPerMeter: 0,
-                biYPelsPerMeter: 0,
-                biClrUsed: 0,
-                biClrImportant: 0,
-            },
-            bmiColors: [Default::default(); 1],
-        };
-        unsafe {
-            StretchDIBits(
-                draw.hDC,
-                image_left,
-                draw.rcItem.top + 8,
-                48,
-                48,
-                0,
-                0,
-                thumbnail.width,
-                thumbnail.height,
-                thumbnail.bgra.as_ptr() as *const c_void,
-                &info,
-                DIB_RGB_COLORS,
-                SRCCOPY,
-            );
-        }
-        draw.rcItem.left + 68
-    } else {
-        draw.rcItem.left + 14
-    };
-
-    let old_font = state.font_body;
-    let previous_font = unsafe { SelectObject(draw.hDC, old_font) };
-    let text = wide(&view.item.display_text());
-    let mut first_line = RECT {
-        left: content_left,
-        top: draw.rcItem.top + 7,
-        right: draw.rcItem.right - 8,
-        bottom: draw.rcItem.top + 35,
-    };
-    unsafe {
-        DrawTextW(
-            draw.hDC,
-            text.as_ptr(),
-            -1,
-            &mut first_line,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-        );
-        SetTextColor(draw.hDC, colors.muted);
-    }
-    let relative_time = relative_history_time(view.item.last_used_at);
-    let source = if view.item.source_exe.is_empty() {
-        format!(
-            "未知来源 · {} · {} KiB",
-            relative_time,
-            view.item.byte_size.div_ceil(1024)
-        )
-    } else {
-        format!(
-            "{} · {} · {} KiB",
-            view.item.source_exe,
-            relative_time,
-            view.item.byte_size.div_ceil(1024)
-        )
-    };
-    let source = wide(&source);
-    let mut second_line = RECT {
-        left: content_left,
-        top: draw.rcItem.top + 35,
-        right: draw.rcItem.right - 8,
-        bottom: draw.rcItem.bottom - 4,
-    };
-    unsafe {
-        DrawTextW(
-            draw.hDC,
-            source.as_ptr(),
-            -1,
-            &mut second_line,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-        );
-        SelectObject(draw.hDC, previous_font);
-    }
-}
-
-fn decode_thumbnail(png: &[u8]) -> Option<Thumbnail> {
-    let image = image::load_from_memory(png)
-        .ok()?
-        .thumbnail(48, 48)
-        .to_rgba8();
-    let (width, height) = image.dimensions();
-    let mut bgra = image.into_raw();
-    for pixel in bgra.chunks_exact_mut(4) {
-        pixel.swap(0, 2);
-    }
-    Some(Thumbnail {
-        width: width as i32,
-        height: height as i32,
-        bgra,
-    })
+    draw_history_row(draw, view, palette(state.dark_mode), state.font_body);
 }
 
 fn show_overlay(state: &mut AppState) {
@@ -2909,29 +1946,6 @@ fn loword(value: usize) -> u16 {
 
 fn hiword(value: usize) -> u16 {
     ((value >> 16) & 0xffff) as u16
-}
-
-fn relative_history_time(timestamp: i64) -> String {
-    let timestamp = if timestamp > 10_000_000_000 {
-        timestamp / 1_000
-    } else {
-        timestamp
-    };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs() as i64)
-        .unwrap_or(timestamp);
-    let seconds = now.saturating_sub(timestamp).max(0);
-    match seconds {
-        0..=59 => "刚刚".to_owned(),
-        60..=3_599 => format!("{} 分钟前", seconds / 60),
-        3_600..=86_399 => format!("{} 小时前", seconds / 3_600),
-        _ => format!("{} 天前", seconds / 86_400),
-    }
-}
-
-const fn rgb(red: u8, green: u8, blue: u8) -> COLORREF {
-    red as u32 | ((green as u32) << 8) | ((blue as u32) << 16)
 }
 
 fn wide(value: &str) -> Vec<u16> {

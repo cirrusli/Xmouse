@@ -6,8 +6,8 @@ use crate::{
         GestureAction, GestureMatch, Point as GesturePoint, Recognizer, UserGestureTemplate,
     },
     hook::{
-        self, HookCommand, UiPoint, WM_APP_CAPTURE_DONE, WM_APP_OVERLAY_BEGIN, WM_APP_OVERLAY_END,
-        WM_APP_OVERLAY_POINT, WM_APP_SHOW_HISTORY, WM_APP_TOAST, WM_APP_TRAY,
+        self, HookCommand, UiPoint, UiStrokeBegin, WM_APP_CAPTURE_DONE, WM_APP_OVERLAY_BEGIN,
+        WM_APP_OVERLAY_END, WM_APP_OVERLAY_POINT, WM_APP_SHOW_HISTORY, WM_APP_TOAST, WM_APP_TRAY,
     },
     logging,
     resources::{ProcessUsage, UsageSampler},
@@ -50,7 +50,7 @@ use windows_sys::Win32::{
         FW_SEMIBOLD, FillRect, GetMonitorInfoW, HBRUSH, HFONT, InvalidateRect, LineTo,
         MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, MoveToEx, PAINTSTRUCT, PS_SOLID,
         RoundRect, ScreenToClient, SelectObject, SetBkColor, SetBkMode, SetTextColor, SetWindowRgn,
-        TRANSPARENT,
+        TRANSPARENT, UpdateWindow,
     },
     System::{
         Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize},
@@ -820,17 +820,26 @@ unsafe extern "system" fn main_proc(
             }
             0
         }
-        WM_APP_OVERLAY_BEGIN | WM_APP_OVERLAY_POINT => {
+        WM_APP_OVERLAY_BEGIN => {
+            if let Some(state) = state_mut() {
+                let pointer = lparam as *mut UiStrokeBegin;
+                if !pointer.is_null() {
+                    let begin = unsafe { *Box::from_raw(pointer) };
+                    state.overlay_points.clear();
+                    state.overlay_points.extend(begin.points);
+                    state.gesture_preview = None;
+                    state.last_gesture_preview_at = None;
+                    refresh_gesture_preview(state);
+                    show_overlay(state);
+                }
+            }
+            0
+        }
+        WM_APP_OVERLAY_POINT => {
             if let Some(state) = state_mut() {
                 let pointer = lparam as *mut UiPoint;
                 if !pointer.is_null() {
                     let point = unsafe { *Box::from_raw(pointer) };
-                    if message == WM_APP_OVERLAY_BEGIN {
-                        state.overlay_points.clear();
-                        state.gesture_preview = None;
-                        state.last_gesture_preview_at = None;
-                        show_overlay(state);
-                    }
                     state.overlay_points.push(point);
                     refresh_gesture_preview(state);
                     unsafe {
@@ -848,6 +857,9 @@ unsafe extern "system" fn main_proc(
                 state.overlay_points.clear();
                 state.gesture_preview = None;
                 state.last_gesture_preview_at = None;
+                unsafe {
+                    InvalidateRect(state.overlay_hwnd, ptr::null(), 0);
+                }
             }
             0
         }
@@ -2401,8 +2413,10 @@ fn show_overlay(state: &mut AppState) {
             y,
             width,
             height,
-            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            SWP_NOACTIVATE,
         );
+        InvalidateRect(state.overlay_hwnd, ptr::null(), 1);
+        UpdateWindow(state.overlay_hwnd);
         ShowWindow(state.overlay_hwnd, SW_SHOWNOACTIVATE);
     }
 }

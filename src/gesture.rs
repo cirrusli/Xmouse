@@ -233,7 +233,7 @@ fn normalized_points(points: &[Point]) -> Option<Vec<Point>> {
     let min_y = points.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
     let max_y = points.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max);
     let scale = (max_x - min_x).max(max_y - min_y);
-    if scale < 1.0 {
+    if !scale.is_finite() || scale <= f32::EPSILON {
         return None;
     }
     let center_x = points.iter().map(|p| p.x).sum::<f32>() / points.len() as f32;
@@ -416,5 +416,14 @@ mod tests {
             .recognize(&jitter(&zigzag, 0.15), 0.82)
             .expect("personalized gesture should match");
         assert_eq!(matched.action, GestureAction::SearchSelection);
+    }
+
+    #[test]
+    fn normalized_personalized_template_remains_valid() {
+        let vertical = line(&[(20.0, 120.0), (22.0, 65.0), (20.0, 5.0)]);
+        let sample = UserGestureTemplate::from_stroke(GestureAction::ToggleTopmost, &vertical)
+            .expect("valid personalized stroke");
+        assert_eq!(sample.points.len(), SAMPLE_COUNT);
+        assert!(sample.is_valid());
     }
 }

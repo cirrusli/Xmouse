@@ -15,7 +15,7 @@ use std::{
 };
 use windows::Win32::{
     System::{
-        Com::{CLSCTX_INPROC_SERVER, CoCreateInstance},
+        Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, IDataObject},
         Ole::{OleFlushClipboard, OleGetClipboard, OleInitialize, OleSetClipboard},
     },
     UI::Accessibility::{
@@ -49,7 +49,9 @@ pub fn run_worker(
         .name("xmouse-actions".to_owned())
         .spawn(move || {
             unsafe {
-                let _ = OleInitialize(None);
+                if let Err(error) = OleInitialize(None) {
+                    logging::error("初始化 OLE", format!("{error:#}"));
+                }
             }
             let mut recognizer = Recognizer::new();
             let mut loaded_user_templates: Vec<UserGestureTemplate> = Vec::new();
@@ -81,8 +83,9 @@ pub fn run_worker(
                     }
                 };
                 if let Err(error) = result {
-                    logging::error("执行手势", &error);
-                    post_toast(ui_hwnd, &format!("操作失败：{error:#}"));
+                    let detail = format!("{error:#}");
+                    logging::error("执行手势", &detail);
+                    post_toast(ui_hwnd, &format!("操作失败：{detail}"));
                 }
             }
         })
@@ -229,9 +232,7 @@ fn search_selection(
 ) -> Result<()> {
     let text = match selected_text_via_uia(target) {
         Ok(Some(text)) if !text.trim().is_empty() => Some(text),
-        _ => selected_text_via_clipboard(clipboard)
-            .context("临时复制选中文本失败")?
-            .filter(|text| !text.trim().is_empty()),
+        _ => selected_text_via_clipboard(clipboard)?.filter(|text| !text.trim().is_empty()),
     }
     .context("没有读取到选中文本")?;
     let trimmed = text.trim();
@@ -281,7 +282,7 @@ fn selected_text_via_uia(_target: HWND) -> Result<Option<String>> {
 }
 
 fn selected_text_via_clipboard(clipboard: &ClipboardService) -> Result<Option<String>> {
-    let snapshot = unsafe { OleGetClipboard() }.context("无法保存原剪贴板")?;
+    let snapshot = get_ole_clipboard_with_retry()?;
     let _suspension = clipboard.suspend_capture();
     clipboard.ignore_next_updates(2);
     let capture_result = (|| {
@@ -306,13 +307,62 @@ fn selected_text_via_clipboard(clipboard: &ClipboardService) -> Result<Option<St
         }
         Ok(None)
     })();
-    let restore_result = unsafe { OleSetClipboard(&snapshot) }
-        .context("恢复原剪贴板失败")
-        .and_then(|_| unsafe { OleFlushClipboard() }.context("固化原剪贴板失败"));
+    let restore_result = restore_ole_clipboard_with_retry(&snapshot);
     thread::sleep(Duration::from_millis(80));
     clipboard.clear_ignored_updates();
     restore_result?;
     capture_result
+}
+
+fn get_ole_clipboard_with_retry() -> Result<IDataObject> {
+    const DELAYS: [u64; 8] = [0, 10, 20, 40, 80, 120, 180, 250];
+    let mut last_error = None;
+    for delay in DELAYS {
+        if delay > 0 {
+            thread::sleep(Duration::from_millis(delay));
+        }
+        match unsafe { OleGetClipboard() } {
+            Ok(snapshot) => return Ok(snapshot),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    let error = last_error.context("OLE 未返回具体错误")?;
+    Err(anyhow::Error::new(error)).context("保存当前剪贴板超时")
+}
+
+fn restore_ole_clipboard_with_retry(snapshot: &IDataObject) -> Result<()> {
+    const DELAYS: [u64; 8] = [0, 10, 20, 40, 80, 120, 180, 250];
+    let mut last_error = None;
+    let mut restored = false;
+    for delay in DELAYS {
+        if delay > 0 {
+            thread::sleep(Duration::from_millis(delay));
+        }
+        match unsafe { OleSetClipboard(snapshot) } {
+            Ok(()) => {
+                restored = true;
+                break;
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    if !restored {
+        let error = last_error.context("OLE 未返回具体错误")?;
+        return Err(anyhow::Error::new(error)).context("恢复原剪贴板超时");
+    }
+
+    last_error = None;
+    for delay in DELAYS {
+        if delay > 0 {
+            thread::sleep(Duration::from_millis(delay));
+        }
+        match unsafe { OleFlushClipboard() } {
+            Ok(()) => return Ok(()),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    let error = last_error.context("OLE 未返回具体错误")?;
+    Err(anyhow::Error::new(error)).context("固化原剪贴板超时")
 }
 
 pub fn post_toast(ui_hwnd: isize, text: &str) {

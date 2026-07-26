@@ -57,10 +57,15 @@ pub enum HookCommand {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct UiPoint {
     pub x: i32,
     pub y: i32,
+}
+
+pub struct UiStrokeBegin {
+    pub points: Vec<UiPoint>,
 }
 
 struct Candidate {
@@ -261,12 +266,8 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 && candidate.max_distance_px >= candidate.activation_distance_px
             {
                 candidate.active = true;
-                post_point(
-                    context,
-                    WM_APP_OVERLAY_BEGIN,
-                    candidate.start.x,
-                    candidate.start.y,
-                );
+                candidate.last_overlay_post = Instant::now();
+                post_stroke_begin(context, &candidate.points);
             }
             if candidate.active && candidate.last_overlay_post.elapsed().as_millis() >= 12 {
                 candidate.last_overlay_post = Instant::now();
@@ -354,6 +355,32 @@ fn post_point(context: &HookContext, message: u32, x: i32, y: i32) {
     }
 }
 
+fn post_stroke_begin(context: &HookContext, points: &[GesturePoint]) {
+    let hwnd = context.ui_hwnd.load(Ordering::Acquire) as HWND;
+    if hwnd.is_null() {
+        return;
+    }
+    let begin = Box::new(UiStrokeBegin {
+        points: stroke_ui_points(points),
+    });
+    let pointer = Box::into_raw(begin);
+    if unsafe { PostMessageW(hwnd, WM_APP_OVERLAY_BEGIN, 0, pointer as LPARAM) } == 0 {
+        unsafe {
+            drop(Box::from_raw(pointer));
+        }
+    }
+}
+
+fn stroke_ui_points(points: &[GesturePoint]) -> Vec<UiPoint> {
+    points
+        .iter()
+        .map(|point| UiPoint {
+            x: point.x as i32,
+            y: point.y as i32,
+        })
+        .collect()
+}
+
 fn post_simple(context: &HookContext, message: u32) {
     let hwnd = context.ui_hwnd.load(Ordering::Acquire) as HWND;
     if !hwnd.is_null() {
@@ -399,7 +426,7 @@ fn gesture_committed(
 
 #[cfg(test)]
 mod tests {
-    use super::gesture_committed;
+    use super::{GesturePoint, UiPoint, gesture_committed, stroke_ui_points};
 
     #[test]
     fn short_or_jittery_drag_is_not_committed() {
@@ -410,5 +437,22 @@ mod tests {
     #[test]
     fn deliberate_drag_is_committed() {
         assert!(gesture_committed(40.0, 24.0, 12.0, 28.0));
+    }
+
+    #[test]
+    fn overlay_activation_keeps_the_buffered_path() {
+        let points = [
+            GesturePoint::new(10.0, 20.0),
+            GesturePoint::new(16.0, 28.0),
+            GesturePoint::new(25.0, 31.0),
+        ];
+        assert_eq!(
+            stroke_ui_points(&points),
+            vec![
+                UiPoint { x: 10, y: 20 },
+                UiPoint { x: 16, y: 28 },
+                UiPoint { x: 25, y: 31 },
+            ]
+        );
     }
 }

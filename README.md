@@ -2,13 +2,13 @@
 
 Xmouse 是面向 Windows 10/11 x64 的轻量鼠标手势与剪贴板历史工具。它使用 Rust 和原生 Win32 API，不包含 WebView 或托管 UI 运行时。
 
-当前版本：**0.7.2**
+当前版本：**0.7.3**
 
 ## 快速启动
 
 双击根目录的 `启动 Xmouse.cmd`。脚本会从 `latest\Xmouse.exe` 启动当前最新版。
 
-便携版也可以直接解压 `outputs\Xmouse-0.7.2-windows-x64.zip` 后运行 `Xmouse.exe`。请保留 `sqlite3.dll` 与程序在同一目录。
+便携版也可以直接解压 `outputs\Xmouse-0.7.3-windows-x64.zip` 后运行 `Xmouse.exe`。请保留 `sqlite3.dll` 与程序在同一目录。
 
 ## 目录结构
 
@@ -28,7 +28,7 @@ Xmouse 是面向 Windows 10/11 x64 的轻量鼠标手势与剪贴板历史工具
 
 - 产品需求、技术选型与后续路线：`docs\PRODUCT-REQUIREMENTS-AND-ROADMAP.md`
 - 工程架构与模块边界：`docs\ARCHITECTURE.md`
-- 当前版本说明：`docs\RELEASE-NOTES-0.7.2.md`
+- 当前版本说明：`docs\RELEASE-NOTES-0.7.3.md`
 - 完整版本历史：`CHANGELOG.md`
 
 ## 默认手势
@@ -79,6 +79,6 @@ cargo test
 cargo build --release
 ```
 
-Release 可执行文件位于 `target\release\xmouse.exe`。当前版本说明见 `docs\RELEASE-NOTES-0.7.2.md`，完整变更历史见 `CHANGELOG.md`。
+Release 可执行文件位于 `target\release\xmouse.exe`。当前版本说明见 `docs\RELEASE-NOTES-0.7.3.md`，完整变更历史见 `CHANGELOG.md`。
 
 首次启动会打开设置页并创建托盘图标。关闭设置页只会隐藏窗口；需要从托盘菜单选择“退出 Xmouse”结束进程。

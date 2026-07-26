@@ -44,13 +44,16 @@ use windows_sys::Win32::{
         CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT,
         POINT, RECT, WPARAM,
     },
-    Graphics::Gdi::{
-        BeginPaint, COLOR_WINDOW, CreatePen, CreateRoundRectRgn, CreateSolidBrush, DT_CENTER,
-        DT_END_ELLIPSIS, DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FW_NORMAL,
-        FW_SEMIBOLD, FillRect, GetMonitorInfoW, HBRUSH, HFONT, InvalidateRect, LineTo,
-        MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, MoveToEx, PAINTSTRUCT, PS_SOLID,
-        RoundRect, ScreenToClient, SelectObject, SetBkColor, SetBkMode, SetTextColor, SetWindowRgn,
-        TRANSPARENT, UpdateWindow,
+    Graphics::{
+        Dwm::DwmFlush,
+        Gdi::{
+            BeginPaint, COLOR_WINDOW, CreatePen, CreateRoundRectRgn, CreateSolidBrush, DT_CENTER,
+            DT_END_ELLIPSIS, DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW, EndPaint,
+            FW_NORMAL, FW_SEMIBOLD, FillRect, GetMonitorInfoW, HBRUSH, HFONT, InvalidateRect,
+            LineTo, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, MoveToEx, PAINTSTRUCT,
+            PS_SOLID, RoundRect, ScreenToClient, SelectObject, SetBkColor, SetBkMode, SetTextColor,
+            SetWindowRgn, TRANSPARENT, UpdateWindow,
+        },
     },
     System::{
         Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize},
@@ -79,19 +82,20 @@ use windows_sys::Win32::{
         WindowsAndMessaging::{
             AppendMenuW, CW_USEDEFAULT, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
             DestroyMenu, DestroyWindow, DispatchMessageW, EN_CHANGE, FindWindowW, GA_ROOT,
-            GWLP_USERDATA, GetAncestor, GetClientRect, GetCursorPos, GetForegroundWindow,
-            GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW,
-            GetWindowTextW, HMENU, HTTRANSPARENT, HWND_TOPMOST, IDC_ARROW, IDI_APPLICATION, IDYES,
-            IsWindowVisible, KillTimer, LB_ADDSTRING, LB_GETCURSEL, LB_ITEMFROMPOINT,
-            LB_RESETCONTENT, LB_SETCURSEL, LBN_DBLCLK, LBN_SELCHANGE, LoadCursorW, LoadIconW,
-            MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO, MF_CHECKED,
-            MF_SEPARATOR, MF_STRING, MSG, MessageBoxW, PostQuitMessage, RegisterClassExW,
-            SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE,
-            SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SendMessageW,
-            SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW,
-            SetWindowPos, SetWindowTextW, ShowWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
-            TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE,
-            WINDOW_STYLE, WM_CLIPBOARDUPDATE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT,
+            GW_OWNER, GWLP_USERDATA, GetAncestor, GetClientRect, GetCursorPos, GetForegroundWindow,
+            GetMessageW, GetSystemMetrics, GetWindow, GetWindowLongPtrW, GetWindowRect,
+            GetWindowTextLengthW, GetWindowTextW, HMENU, HTTRANSPARENT, HWND_TOPMOST, IDC_ARROW,
+            IDI_APPLICATION, IDYES, IsWindowVisible, KillTimer, LB_ADDSTRING, LB_GETCURSEL,
+            LB_ITEMFROMPOINT, LB_RESETCONTENT, LB_SETCURSEL, LBN_DBLCLK, LBN_SELCHANGE, LWA_ALPHA,
+            LWA_COLORKEY, LoadCursorW, LoadIconW, MB_ICONERROR, MB_ICONINFORMATION,
+            MB_ICONQUESTION, MB_OK, MB_YESNO, MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG,
+            MessageBoxW, PostQuitMessage, RegisterClassExW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+            SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE,
+            SWP_NOACTIVATE, SWP_SHOWWINDOW, SendMessageW, SetForegroundWindow,
+            SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
+            ShowWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+            TrackPopupMenu, TranslateMessage, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE,
+            WM_ACTIVATE, WM_CLIPBOARDUPDATE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT,
             WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND,
             WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT,
             WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_CAPTION, WS_CLIPCHILDREN, WS_EX_LAYERED,
@@ -314,7 +318,7 @@ pub fn run() -> Result<()> {
         (*state_pointer).preview_hwnd = preview_hwnd;
         (*state_pointer).overlay_hwnd = overlay_hwnd;
         (*state_pointer).toast_hwnd = toast_hwnd;
-        SetLayeredWindowAttributes(overlay_hwnd, rgb(0, 0, 0), 255, 1);
+        SetLayeredWindowAttributes(overlay_hwnd, rgb(0, 0, 0), 0, LWA_COLORKEY | LWA_ALPHA);
         let toast_region = CreateRoundRectRgn(0, 0, 360, 52, 16, 16);
         SetWindowRgn(toast_hwnd, toast_region, 1);
         apply_window_theme(main_hwnd, dark_mode);
@@ -851,15 +855,7 @@ unsafe extern "system" fn main_proc(
         }
         WM_APP_OVERLAY_END => {
             if let Some(state) = state_mut() {
-                unsafe {
-                    ShowWindow(state.overlay_hwnd, SW_HIDE);
-                }
-                state.overlay_points.clear();
-                state.gesture_preview = None;
-                state.last_gesture_preview_at = None;
-                unsafe {
-                    InvalidateRect(state.overlay_hwnd, ptr::null(), 0);
-                }
+                hide_overlay(state);
             }
             0
         }
@@ -1060,6 +1056,21 @@ unsafe extern "system" fn history_proc(
                     IDC_HISTORY_CLEAR => confirm_clear_history(state),
                     _ => {}
                 }
+            }
+            0
+        }
+        WM_ACTIVATE if loword(wparam) as u32 == WA_INACTIVE => {
+            let activated = lparam as HWND;
+            if !is_owned_window(activated, hwnd)
+                && let Some(state) = state_mut()
+            {
+                dismiss_history(state);
+            }
+            0
+        }
+        WM_LBUTTONDOWN => {
+            if let Some(state) = state_mut() {
+                hide_history(state);
             }
             0
         }
@@ -1800,16 +1811,30 @@ fn show_history(state: &mut AppState, origin: isize) {
 }
 
 fn hide_history(state: &mut AppState) {
-    clear_history_hover(state);
-    unsafe {
-        ShowWindow(state.history_hwnd, SW_HIDE);
-    }
+    dismiss_history(state);
     let origin = state.history_origin as HWND;
     if !origin.is_null() {
         unsafe {
             SetForegroundWindow(origin);
         }
     }
+}
+
+fn dismiss_history(state: &mut AppState) {
+    clear_history_hover(state);
+    unsafe {
+        ShowWindow(state.history_hwnd, SW_HIDE);
+    }
+}
+
+fn is_owned_window(mut window: HWND, owner: HWND) -> bool {
+    while !window.is_null() {
+        window = unsafe { GetWindow(window, GW_OWNER) };
+        if window == owner {
+            return true;
+        }
+    }
+    false
 }
 
 fn rebuild_history(state: &mut AppState, query: &str) {
@@ -2406,6 +2431,15 @@ fn show_overlay(state: &mut AppState) {
     let width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
     let height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
     unsafe {
+        // A hidden layered window can retain its last compositor surface. Keep it fully
+        // transparent while making it visible and repainting the new stroke, then reveal it
+        // only after DWM has consumed the cleared surface.
+        SetLayeredWindowAttributes(
+            state.overlay_hwnd,
+            rgb(0, 0, 0),
+            0,
+            LWA_COLORKEY | LWA_ALPHA,
+        );
         SetWindowPos(
             state.overlay_hwnd,
             HWND_TOPMOST,
@@ -2413,11 +2447,40 @@ fn show_overlay(state: &mut AppState) {
             y,
             width,
             height,
-            SWP_NOACTIVATE,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW,
         );
         InvalidateRect(state.overlay_hwnd, ptr::null(), 1);
         UpdateWindow(state.overlay_hwnd);
-        ShowWindow(state.overlay_hwnd, SW_SHOWNOACTIVATE);
+        DwmFlush();
+        SetLayeredWindowAttributes(
+            state.overlay_hwnd,
+            rgb(0, 0, 0),
+            255,
+            LWA_COLORKEY | LWA_ALPHA,
+        );
+    }
+}
+
+fn hide_overlay(state: &mut AppState) {
+    let was_visible = unsafe { IsWindowVisible(state.overlay_hwnd) } != 0;
+    unsafe {
+        SetLayeredWindowAttributes(
+            state.overlay_hwnd,
+            rgb(0, 0, 0),
+            0,
+            LWA_COLORKEY | LWA_ALPHA,
+        );
+    }
+    state.overlay_points.clear();
+    state.gesture_preview = None;
+    state.last_gesture_preview_at = None;
+    unsafe {
+        InvalidateRect(state.overlay_hwnd, ptr::null(), 1);
+        if was_visible {
+            UpdateWindow(state.overlay_hwnd);
+            DwmFlush();
+        }
+        ShowWindow(state.overlay_hwnd, SW_HIDE);
     }
 }
 

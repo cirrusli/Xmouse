@@ -1068,12 +1068,6 @@ unsafe extern "system" fn history_proc(
             }
             0
         }
-        WM_LBUTTONDOWN => {
-            if let Some(state) = state_mut() {
-                hide_history(state);
-            }
-            0
-        }
         WM_DRAWITEM => {
             let draw = unsafe { &*(lparam as *const DRAWITEMSTRUCT) };
             if draw.CtlID as i32 == IDC_HISTORY_LIST {

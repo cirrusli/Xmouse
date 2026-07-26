@@ -24,6 +24,12 @@ Xmouse 是面向 Windows 10/11 x64 的轻量鼠标手势与剪贴板历史工具
 
 `latest`、`archive` 和 `outputs` 中的二进制交付物不会提交到 Git；版本历史由 Git 标签和 `CHANGELOG.md` 共同记录。
 
+## 项目文档
+
+- 产品需求、技术选型与 0.5.0 路线：`docs\PRODUCT-REQUIREMENTS-AND-ROADMAP.md`
+- 当前版本说明：`docs\RELEASE-NOTES-0.4.0.md`
+- 完整版本历史：`CHANGELOG.md`
+
 ## 默认手势
 
 | 手势 | 动作 |

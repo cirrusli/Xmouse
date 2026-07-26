@@ -2,7 +2,7 @@ use crate::{
     config::AppConfig,
     storage::{ClipPayload, Storage, normalize_image_to_png, png_to_dib},
 };
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use std::{
     path::Path,
     ptr,
@@ -14,20 +14,34 @@ use std::{
     time::Duration,
 };
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, GlobalFree, HANDLE, HGLOBAL, HWND},
+    Foundation::{CloseHandle, GetLastError, GlobalFree, HANDLE, HGLOBAL, HWND, SetLastError},
     System::{
         DataExchange::{
-            CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardOwner,
-            IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+            CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
+            GetClipboardOwner, IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW,
+            SetClipboardData,
         },
         Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock},
-        Ole::{CF_DIB, CF_DIBV5, CF_UNICODETEXT},
+        Ole::{CF_BITMAP, CF_DIB, CF_DIBV5, CF_DSPBITMAP, CF_PALETTE, CF_UNICODETEXT},
         Threading::{
             OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
             QueryFullProcessImageNameW,
         },
     },
 };
+
+const MAX_CLIPBOARD_SNAPSHOT_BYTES: usize = 128 * 1024 * 1024;
+
+#[derive(Debug)]
+pub struct ClipboardSnapshot {
+    formats: Vec<SnapshotFormat>,
+}
+
+#[derive(Debug)]
+struct SnapshotFormat {
+    format: u32,
+    bytes: Vec<u8>,
+}
 
 #[derive(Clone)]
 pub struct ClipboardService {
@@ -83,8 +97,51 @@ impl ClipboardService {
     }
 
     pub fn read_current_text(&self) -> Result<Option<String>> {
-        let _guard = ClipboardGuard::open_with_retry(ptr::null_mut())?;
-        read_unicode_text()
+        let guard = ClipboardGuard::open_with_retry(ptr::null_mut())?;
+        let text = read_unicode_text();
+        drop(guard);
+        text
+    }
+
+    /// Materializes the clipboard instead of retaining the live IDataObject returned by OLE.
+    /// A live object can recursively reopen the clipboard during OleSetClipboard and fail with
+    /// CLIPBRD_E_CANT_OPEN after the target application has replaced its contents.
+    pub fn snapshot_current(&self) -> Result<ClipboardSnapshot> {
+        let guard = ClipboardGuard::open_with_retry(ptr::null_mut())?;
+        let snapshot = capture_snapshot();
+        drop(guard);
+        snapshot
+    }
+
+    pub fn restore_snapshot(&self, snapshot: &ClipboardSnapshot) -> Result<()> {
+        let mut prepared = Vec::with_capacity(snapshot.formats.len());
+        for item in &snapshot.formats {
+            let global = allocate_and_copy(item.bytes.as_ptr(), item.bytes.len())
+                .with_context(|| format!("准备剪贴板格式 {} 失败", item.format))?;
+            prepared.push(PreparedFormat {
+                format: item.format,
+                global: Some(global),
+            });
+        }
+
+        let guard = ClipboardGuard::open_for_restore(ptr::null_mut())?;
+        unsafe {
+            if EmptyClipboard() == 0 {
+                bail!("清空临时剪贴板失败 (Win32 {})", GetLastError());
+            }
+        }
+        for item in &mut prepared {
+            let global = item.global.context("待恢复的剪贴板内存已丢失")?;
+            if unsafe { SetClipboardData(item.format, global as HANDLE) }.is_null() {
+                bail!("恢复剪贴板格式 {} 失败 (Win32 {})", item.format, unsafe {
+                    GetLastError()
+                });
+            }
+            // SetClipboardData transfers ownership to the system on success.
+            item.global = None;
+        }
+        drop(guard);
+        Ok(())
     }
 
     pub fn capture_current(&self) -> Result<()> {
@@ -184,6 +241,119 @@ impl Drop for ClipboardGuard {
             CloseClipboard();
         }
     }
+}
+
+impl ClipboardGuard {
+    fn open_for_restore(owner: HWND) -> Result<Self> {
+        const DELAYS: [u64; 12] = [0, 10, 20, 40, 80, 120, 180, 250, 400, 600, 900, 1_200];
+        let mut last_error = 0;
+        for delay in DELAYS {
+            if delay > 0 {
+                thread::sleep(Duration::from_millis(delay));
+            }
+            if unsafe { OpenClipboard(owner) } != 0 {
+                return Ok(Self);
+            }
+            last_error = unsafe { GetLastError() };
+        }
+        bail!("恢复原剪贴板超时：仍被其他程序占用 (Win32 {last_error})")
+    }
+}
+
+struct PreparedFormat {
+    format: u32,
+    global: Option<HGLOBAL>,
+}
+
+impl Drop for PreparedFormat {
+    fn drop(&mut self) {
+        if let Some(global) = self.global.take() {
+            unsafe {
+                GlobalFree(global);
+            }
+        }
+    }
+}
+
+fn capture_snapshot() -> Result<ClipboardSnapshot> {
+    let mut formats = Vec::new();
+    let mut total_bytes = 0usize;
+    let mut unsupported = Vec::new();
+    let mut current = 0u32;
+
+    loop {
+        unsafe {
+            SetLastError(0);
+        }
+        let next = unsafe { EnumClipboardFormats(current) };
+        if next == 0 {
+            let error = unsafe { GetLastError() };
+            if error != 0 {
+                bail!(
+                    "枚举剪贴板格式失败 (Win32 {error}, previous {current}, copied {})",
+                    formats.len()
+                );
+            }
+            break;
+        }
+        current = next;
+
+        let handle = unsafe { GetClipboardData(current) };
+        if handle.is_null() {
+            bail!("读取剪贴板格式 {current} 失败 (Win32 {})", unsafe {
+                GetLastError()
+            });
+        }
+        let global = handle as HGLOBAL;
+        let size = unsafe { GlobalSize(global) };
+        if size == 0 {
+            unsupported.push(current);
+            continue;
+        }
+        total_bytes = total_bytes
+            .checked_add(size)
+            .context("剪贴板快照大小溢出")?;
+        if total_bytes > MAX_CLIPBOARD_SNAPSHOT_BYTES {
+            bail!("当前剪贴板超过 128 MiB，无法安全保存后再读取选区");
+        }
+        let pointer = unsafe { GlobalLock(global) } as *const u8;
+        if pointer.is_null() {
+            bail!("锁定剪贴板格式 {current} 失败 (Win32 {})", unsafe {
+                GetLastError()
+            });
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(pointer, size) }.to_vec();
+        unsafe {
+            GlobalUnlock(global);
+        }
+        formats.push(SnapshotFormat {
+            format: current,
+            bytes,
+        });
+    }
+
+    if !unsupported.is_empty() && !can_safely_omit_handle_formats(&unsupported, &formats) {
+        bail!(
+            "当前剪贴板含无法安全备份的格式 {:?}，已取消临时复制",
+            unsupported
+        );
+    }
+
+    Ok(ClipboardSnapshot { formats })
+}
+
+fn can_safely_omit_handle_formats(unsupported: &[u32], formats: &[SnapshotFormat]) -> bool {
+    let has_bitmap_copy = formats
+        .iter()
+        .any(|item| item.format == CF_DIB as u32 || item.format == CF_DIBV5 as u32);
+    unsupported.iter().all(|format| {
+        matches!(
+            *format,
+            value if value == CF_BITMAP as u32
+                || value == CF_DSPBITMAP as u32
+                || value == CF_PALETTE as u32
+        ) && has_bitmap_copy
+    })
 }
 
 fn clipboard_requests_exclusion() -> Result<bool> {
@@ -368,4 +538,107 @@ pub fn process_name(process_id: u32) -> Option<String> {
 fn register_format(name: &str) -> u32 {
     let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
     unsafe { RegisterClipboardFormatW(wide.as_ptr()) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{config::AppConfig, storage::Storage};
+    use std::{collections::BTreeMap, fs, sync::RwLock, time::SystemTime};
+
+    #[test]
+    fn only_omits_bitmap_handles_when_a_dib_copy_exists() {
+        let dib = vec![SnapshotFormat {
+            format: CF_DIB as u32,
+            bytes: vec![1],
+        }];
+        assert!(can_safely_omit_handle_formats(
+            &[CF_BITMAP as u32, CF_PALETTE as u32],
+            &dib
+        ));
+        assert!(!can_safely_omit_handle_formats(&[CF_BITMAP as u32], &[]));
+        assert!(!can_safely_omit_handle_formats(&[49_999], &dib));
+    }
+
+    #[test]
+    #[ignore = "temporarily rewrites the interactive user's clipboard"]
+    fn materialized_snapshot_round_trips_text_and_custom_formats() {
+        let suffix = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("xmouse-clipboard-test-{suffix}"));
+        let config = Arc::new(RwLock::new(AppConfig::default()));
+        let storage = Storage::open(root.clone(), config.clone()).unwrap();
+        let service = ClipboardService::new(storage, config);
+
+        let user_clipboard = service.snapshot_current().unwrap();
+        let as_map = |snapshot: ClipboardSnapshot| {
+            snapshot
+                .formats
+                .into_iter()
+                .map(|item| (item.format, item.bytes))
+                .collect::<BTreeMap<_, _>>()
+        };
+
+        let exercise = (|| -> Result<()> {
+            let text = "Xmouse original clipboard fixture";
+            let mut unicode = text
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>();
+            unicode.extend_from_slice(&[0, 0]);
+            let html_format = register_format("HTML Format");
+            let source_format = register_format("Chromium internal source URL");
+            let fixture = ClipboardSnapshot {
+                formats: vec![
+                    SnapshotFormat {
+                        format: CF_UNICODETEXT as u32,
+                        bytes: unicode,
+                    },
+                    SnapshotFormat {
+                        format: html_format,
+                        bytes: b"Version:0.9\r\nStartHTML:0000000000\r\n<html>Xmouse</html>\0"
+                            .to_vec(),
+                    },
+                    SnapshotFormat {
+                        format: source_format,
+                        bytes: b"https://example.invalid/\0".to_vec(),
+                    },
+                ],
+            };
+            service.restore_snapshot(&fixture)?;
+            thread::sleep(Duration::from_millis(100));
+            let original = service.snapshot_current()?;
+
+            let probe = "Xmouse temporary clipboard probe 7f3a";
+            service.set_payload(&ClipPayload::Text(probe.to_owned()))?;
+            let deadline = std::time::Instant::now() + Duration::from_millis(500);
+            let mut observed_probe = None;
+            while std::time::Instant::now() < deadline {
+                observed_probe = service.read_current_text()?;
+                if observed_probe.as_deref() == Some(probe) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(15));
+            }
+            if observed_probe.as_deref() != Some(probe) {
+                bail!("temporary clipboard text was not observable");
+            }
+
+            service.restore_snapshot(&original)?;
+            thread::sleep(Duration::from_millis(100));
+            let restored = service.snapshot_current()?;
+            if as_map(restored) != as_map(original) {
+                bail!("materialized clipboard formats did not round-trip exactly");
+            }
+            Ok(())
+        })();
+
+        let user_restore = service.restore_snapshot(&user_clipboard);
+        thread::sleep(Duration::from_millis(100));
+        fs::remove_dir_all(root).unwrap();
+        user_restore.unwrap();
+        exercise.unwrap();
+    }
 }

@@ -15,8 +15,8 @@ use std::{
 };
 use windows::Win32::{
     System::{
-        Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, IDataObject},
-        Ole::{OleFlushClipboard, OleGetClipboard, OleInitialize, OleSetClipboard},
+        Com::{CLSCTX_INPROC_SERVER, CoCreateInstance},
+        Ole::OleInitialize,
     },
     UI::Accessibility::{
         CUIAutomation, IUIAutomation, IUIAutomationTextPattern, UIA_TextPatternId,
@@ -282,7 +282,7 @@ fn selected_text_via_uia(_target: HWND) -> Result<Option<String>> {
 }
 
 fn selected_text_via_clipboard(clipboard: &ClipboardService) -> Result<Option<String>> {
-    let snapshot = get_ole_clipboard_with_retry()?;
+    let snapshot = clipboard.snapshot_current().context("保存当前剪贴板失败")?;
     let _suspension = clipboard.suspend_capture();
     clipboard.ignore_next_updates(2);
     let capture_result = (|| {
@@ -307,62 +307,11 @@ fn selected_text_via_clipboard(clipboard: &ClipboardService) -> Result<Option<St
         }
         Ok(None)
     })();
-    let restore_result = restore_ole_clipboard_with_retry(&snapshot);
+    let restore_result = clipboard.restore_snapshot(&snapshot);
     thread::sleep(Duration::from_millis(80));
     clipboard.clear_ignored_updates();
-    restore_result?;
+    restore_result.context("恢复原剪贴板失败")?;
     capture_result
-}
-
-fn get_ole_clipboard_with_retry() -> Result<IDataObject> {
-    const DELAYS: [u64; 8] = [0, 10, 20, 40, 80, 120, 180, 250];
-    let mut last_error = None;
-    for delay in DELAYS {
-        if delay > 0 {
-            thread::sleep(Duration::from_millis(delay));
-        }
-        match unsafe { OleGetClipboard() } {
-            Ok(snapshot) => return Ok(snapshot),
-            Err(error) => last_error = Some(error),
-        }
-    }
-    let error = last_error.context("OLE 未返回具体错误")?;
-    Err(anyhow::Error::new(error)).context("保存当前剪贴板超时")
-}
-
-fn restore_ole_clipboard_with_retry(snapshot: &IDataObject) -> Result<()> {
-    const DELAYS: [u64; 8] = [0, 10, 20, 40, 80, 120, 180, 250];
-    let mut last_error = None;
-    let mut restored = false;
-    for delay in DELAYS {
-        if delay > 0 {
-            thread::sleep(Duration::from_millis(delay));
-        }
-        match unsafe { OleSetClipboard(snapshot) } {
-            Ok(()) => {
-                restored = true;
-                break;
-            }
-            Err(error) => last_error = Some(error),
-        }
-    }
-    if !restored {
-        let error = last_error.context("OLE 未返回具体错误")?;
-        return Err(anyhow::Error::new(error)).context("恢复原剪贴板超时");
-    }
-
-    last_error = None;
-    for delay in DELAYS {
-        if delay > 0 {
-            thread::sleep(Duration::from_millis(delay));
-        }
-        match unsafe { OleFlushClipboard() } {
-            Ok(()) => return Ok(()),
-            Err(error) => last_error = Some(error),
-        }
-    }
-    let error = last_error.context("OLE 未返回具体错误")?;
-    Err(anyhow::Error::new(error)).context("固化原剪贴板超时")
 }
 
 pub fn post_toast(ui_hwnd: isize, text: &str) {

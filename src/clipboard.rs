@@ -22,7 +22,10 @@ use windows_sys::Win32::{
             SetClipboardData,
         },
         Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock},
-        Ole::{CF_BITMAP, CF_DIB, CF_DIBV5, CF_DSPBITMAP, CF_PALETTE, CF_UNICODETEXT},
+        Ole::{
+            CF_BITMAP, CF_DIB, CF_DIBV5, CF_DSPBITMAP, CF_DSPENHMETAFILE, CF_DSPMETAFILEPICT,
+            CF_ENHMETAFILE, CF_METAFILEPICT, CF_PALETTE, CF_UNICODETEXT,
+        },
         Threading::{
             OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
             QueryFullProcessImageNameW,
@@ -297,6 +300,13 @@ fn capture_snapshot() -> Result<ClipboardSnapshot> {
             break;
         }
         current = next;
+        // GDI and metafile clipboard formats are not HGLOBAL values. Calling GlobalSize on
+        // those handles is undefined and can corrupt the process heap, so classify them
+        // before attempting to materialize ordinary memory-backed formats.
+        if is_non_global_handle_format(current) {
+            unsupported.push(current);
+            continue;
+        }
 
         let handle = unsafe { GetClipboardData(current) };
         if handle.is_null() {
@@ -354,6 +364,19 @@ fn can_safely_omit_handle_formats(unsupported: &[u32], formats: &[SnapshotFormat
                 || value == CF_PALETTE as u32
         ) && has_bitmap_copy
     })
+}
+
+fn is_non_global_handle_format(format: u32) -> bool {
+    matches!(
+        format,
+        value if value == CF_BITMAP as u32
+            || value == CF_DSPBITMAP as u32
+            || value == CF_PALETTE as u32
+            || value == CF_METAFILEPICT as u32
+            || value == CF_DSPMETAFILEPICT as u32
+            || value == CF_ENHMETAFILE as u32
+            || value == CF_DSPENHMETAFILE as u32
+    )
 }
 
 fn clipboard_requests_exclusion() -> Result<bool> {
@@ -558,6 +581,23 @@ mod tests {
         ));
         assert!(!can_safely_omit_handle_formats(&[CF_BITMAP as u32], &[]));
         assert!(!can_safely_omit_handle_formats(&[49_999], &dib));
+    }
+
+    #[test]
+    fn classifies_non_global_clipboard_handles_before_reading_their_size() {
+        for format in [
+            CF_BITMAP,
+            CF_DSPBITMAP,
+            CF_PALETTE,
+            CF_METAFILEPICT,
+            CF_DSPMETAFILEPICT,
+            CF_ENHMETAFILE,
+            CF_DSPENHMETAFILE,
+        ] {
+            assert!(is_non_global_handle_format(format as u32));
+        }
+        assert!(!is_non_global_handle_format(CF_UNICODETEXT as u32));
+        assert!(!is_non_global_handle_format(CF_DIB as u32));
     }
 
     #[test]

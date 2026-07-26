@@ -1,4 +1,7 @@
-use crate::gesture::{GestureAction, UserGestureTemplate};
+use crate::{
+    action::ActionKind,
+    gesture::{GestureId, UserGestureTemplate},
+};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -61,6 +64,12 @@ pub struct GestureGuardConfig {
     pub excluded_processes: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GestureBinding {
+    pub gesture: GestureId,
+    pub action: ActionKind,
+}
+
 impl Default for GestureGuardConfig {
     fn default() -> Self {
         Self {
@@ -85,6 +94,7 @@ pub struct AppConfig {
     pub search_url_template: String,
     pub autostart: bool,
     pub custom_gestures: Vec<UserGestureTemplate>,
+    pub gesture_bindings: Vec<GestureBinding>,
     pub gesture_guard: GestureGuardConfig,
     pub history: HistoryConfig,
 }
@@ -104,6 +114,7 @@ impl Default for AppConfig {
             search_url_template: DEFAULT_SEARCH_URL.to_owned(),
             autostart: false,
             custom_gestures: Vec::new(),
+            gesture_bindings: default_gesture_bindings(),
             gesture_guard: GestureGuardConfig::default(),
             history: HistoryConfig::default(),
         }
@@ -130,22 +141,36 @@ impl AppConfig {
         if !self.search_url_template.contains("{query}") {
             bail!("搜索网址必须包含 {{query}}");
         }
-        if self.custom_gestures.len() > GestureAction::ALL.len() * 3 {
-            bail!("每个动作最多保存 3 个个性化手势样本");
+        if self.custom_gestures.len() > GestureId::ALL.len() * 3 {
+            bail!("每条轨迹最多保存 3 个个性化手势样本");
         }
-        for action in GestureAction::ALL {
+        for gesture in GestureId::ALL {
             if self
                 .custom_gestures
                 .iter()
-                .filter(|sample| sample.action == action)
+                .filter(|sample| sample.gesture == gesture)
                 .count()
                 > 3
             {
-                bail!("{} 的个性化样本超过 3 个", action.short_label());
+                bail!("{} 的个性化样本超过 3 个", gesture.short_label());
             }
         }
         if self.custom_gestures.iter().any(|sample| !sample.is_valid()) {
             bail!("个性化手势样本损坏");
+        }
+        if self.gesture_bindings.len() > GestureId::ALL.len() {
+            bail!("手势动作映射数量无效");
+        }
+        for gesture in GestureId::ALL {
+            if self
+                .gesture_bindings
+                .iter()
+                .filter(|binding| binding.gesture == gesture)
+                .count()
+                > 1
+            {
+                bail!("{} 存在重复动作映射", gesture.short_label());
+            }
         }
         if self.gesture_guard.excluded_processes.len() > 256
             || self
@@ -164,6 +189,49 @@ impl AppConfig {
         }
         Ok(())
     }
+
+    pub fn action_for(&self, gesture: GestureId) -> ActionKind {
+        self.gesture_bindings
+            .iter()
+            .find(|binding| binding.gesture == gesture)
+            .map(|binding| binding.action)
+            .unwrap_or_else(|| default_action(gesture))
+    }
+
+    pub fn set_action(&mut self, gesture: GestureId, action: ActionKind) {
+        if let Some(binding) = self
+            .gesture_bindings
+            .iter_mut()
+            .find(|binding| binding.gesture == gesture)
+        {
+            binding.action = action;
+        } else {
+            self.gesture_bindings
+                .push(GestureBinding { gesture, action });
+        }
+    }
+}
+
+pub fn default_action(gesture: GestureId) -> ActionKind {
+    match gesture {
+        GestureId::Up => ActionKind::ToggleTopmost,
+        GestureId::LetterL => ActionKind::CloseTab,
+        GestureId::LetterS => ActionKind::SearchSelection,
+        GestureId::LetterC => ActionKind::CopySelection,
+        GestureId::LetterV => ActionKind::OpenHistory,
+        GestureId::Left => ActionKind::SwitchDesktopLeft,
+        GestureId::Right => ActionKind::SwitchDesktopRight,
+    }
+}
+
+fn default_gesture_bindings() -> Vec<GestureBinding> {
+    GestureId::ALL
+        .into_iter()
+        .map(|gesture| GestureBinding {
+            gesture,
+            action: default_action(gesture),
+        })
+        .collect()
 }
 
 pub fn app_data_dir() -> Result<PathBuf> {
@@ -252,6 +320,10 @@ mod tests {
         assert!(config.gesture_guard.disable_in_fullscreen_apps);
         assert!(config.gesture_guard.excluded_processes.is_empty());
         assert!(config.history.auto_paste);
+        assert_eq!(
+            config.action_for(GestureId::LetterS),
+            ActionKind::SearchSelection
+        );
         config.validate().expect("default remains valid");
     }
 
@@ -275,7 +347,7 @@ mod tests {
             .map(|index| Point::new(index as f32, index as f32))
             .collect();
         let sample = UserGestureTemplate {
-            action: GestureAction::SearchSelection,
+            gesture: GestureId::LetterS,
             points,
         };
         assert!(sample.is_valid());
@@ -284,5 +356,37 @@ mod tests {
             ..AppConfig::default()
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn gesture_bindings_are_customizable_and_reject_duplicates() {
+        let mut config = AppConfig::default();
+        config.set_action(GestureId::LetterC, ActionKind::Paste);
+        assert_eq!(config.action_for(GestureId::LetterC), ActionKind::Paste);
+        config.validate().unwrap();
+
+        config.gesture_bindings.push(GestureBinding {
+            gesture: GestureId::LetterC,
+            action: ActionKind::CopySelection,
+        });
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn legacy_personalized_samples_keep_their_shape_after_upgrade() {
+        let config: AppConfig = serde_json::from_str(
+            r#"{
+                "custom_gestures": [{
+                    "action": "copy_selection",
+                    "points": []
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(config.custom_gestures[0].gesture, GestureId::LetterC);
+        assert_eq!(
+            config.action_for(GestureId::LetterC),
+            ActionKind::CopySelection
+        );
     }
 }

@@ -10,6 +10,7 @@ flowchart LR
     App --> UI["ui/ · 布局与绘制"]
     App --> Hook["hook.rs · 鼠标状态机"]
     App --> Actions["actions.rs · 动作执行"]
+    Actions --> ActionModel["action.rs · 安全动作模型"]
     App --> Clipboard["clipboard.rs · 剪贴板适配"]
     Clipboard --> Storage["storage.rs · SQLite/媒体"]
     Hook --> Gesture["gesture.rs · 轨迹识别"]
@@ -23,6 +24,7 @@ flowchart LR
 | --- | --- | --- |
 | `app.rs` | 生命周期、窗口过程、状态协调、命令路由 | 控件布局细节、图片解码、数据库 SQL |
 | `ui/settings.rs` | 设置页结构和控件句柄集合 | 配置持久化和业务判断 |
+| `ui/gesture_settings.rs` | 手势页轨迹选择、动作绑定和训练控件布局 | 识别、执行和配置写入 |
 | `ui/gesture_editor.rs` | 个性化轨迹画布、命中区域和纯绘制 | 配置写入和手势执行 |
 | `ui/history_popup.rs` | 历史弹窗布局、搜索/列表/操作控件 | 历史查询和置顶写入 |
 | `ui/history_preview.rs` | 大图缩放、Alpha 合成和预览窗绘制 | 磁盘查询和悬停状态判断 |
@@ -31,6 +33,9 @@ flowchart LR
 | `ui/theme.rs` | 配色、字体、DWM/子控件主题 | 页面布局 |
 | `ui/native.rs` | HWND 控件创建和公共原生操作 | 业务命令 |
 | `storage.rs` | schema、迁移、查询、去重、置顶和淘汰 | UI 文案与窗口操作 |
+| `gesture.rs` | 轨迹 ID、模板、个人样本归一化和识别 | 具体动作执行 |
+| `action.rs` | 有限安全动作枚举与用户文案 | `SendInput`、窗口句柄和 UI 状态 |
+| `actions.rs` | 轨迹绑定解析后的目标验证与动作执行 | 手势形状识别和任意脚本 |
 
 依赖方向保持为 `app → ui/domain services`。纯绘制函数通过参数接收主题、字体和视图数据，不读取 `AppState`；这样可以独立调整页面而不影响钩子与存储线程。
 
@@ -50,6 +55,8 @@ flowchart LR
 用户在设置页画布中用左键绘制单笔轨迹。UI 只收集坐标；`gesture.rs` 将轨迹重采样为 64 点并归一化，再以 `UserGestureTemplate` 保存到版本化配置。每个动作最多保留 3 份个人样本，超限时替换最早一份。
 
 动作线程在下一次手势到达时检测模板列表变化并热更新识别器；轨迹层使用同一份模板即时刷新预测。个人样本和内置模板共同参与“最高分 + 候选分差”判断，删除个人样本不会删除内置模板。
+
+识别结果是稳定的 `GestureId`，不会直接携带动作。`AppConfig::action_for` 再把轨迹解析为 `ActionKind`；因此动作改绑不会污染识别模板或个人样本。动作集合是编译期白名单，不包含任意脚本、命令行或插件入口。
 
 S 动作优先读取 UI Automation 选区。失败后动作线程保存 OLE `IDataObject`、发送 `Ctrl+C`，等待剪贴板序号变化且 Unicode 文本真正可读，再恢复原数据对象。整个过程暂停历史捕获，避免临时内容进入数据库。
 

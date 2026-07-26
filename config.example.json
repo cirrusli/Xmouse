@@ -11,6 +11,15 @@
   "search_url_template": "https://www.google.com/search?q={query}",
   "autostart": false,
   "custom_gestures": [],
+  "gesture_bindings": [
+    { "gesture": "up", "action": "toggle_topmost" },
+    { "gesture": "letter_l", "action": "close_tab" },
+    { "gesture": "letter_s", "action": "search_selection" },
+    { "gesture": "letter_c", "action": "copy_selection" },
+    { "gesture": "letter_v", "action": "open_history" },
+    { "gesture": "left", "action": "switch_desktop_left" },
+    { "gesture": "right", "action": "switch_desktop_right" }
+  ],
   "gesture_guard": {
     "disable_in_fullscreen_apps": true,
     "excluded_processes": []

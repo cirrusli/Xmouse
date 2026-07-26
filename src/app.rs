@@ -1,10 +1,9 @@
 use crate::{
+    action::ActionKind,
     actions::{paste_into_target, post_toast, run_worker},
     clipboard::ClipboardService,
     config::{self, AppConfig, TriggerButton},
-    gesture::{
-        GestureAction, GestureMatch, Point as GesturePoint, Recognizer, UserGestureTemplate,
-    },
+    gesture::{GestureId, GestureMatch, Point as GesturePoint, Recognizer, UserGestureTemplate},
     hook::{
         self, HookCommand, UiPoint, UiStrokeBegin, WM_APP_CAPTURE_DONE, WM_APP_OVERLAY_BEGIN,
         WM_APP_OVERLAY_END, WM_APP_OVERLAY_POINT, WM_APP_SHOW_HISTORY, WM_APP_TOAST, WM_APP_TRAY,
@@ -15,6 +14,7 @@ use crate::{
     ui::{
         format::{format_bytes, format_uptime},
         gesture_editor,
+        gesture_settings::*,
         history_popup::{self, *},
         history_preview::PreviewImage,
         history_view::{HistoryView, draw_history_item as draw_history_row},
@@ -88,19 +88,19 @@ use windows_sys::Win32::{
             IDI_APPLICATION, IDYES, IsWindow, IsWindowVisible, KillTimer, LB_ADDSTRING,
             LB_GETCURSEL, LB_ITEMFROMPOINT, LB_RESETCONTENT, LB_SETCURSEL, LBN_DBLCLK,
             LBN_SELCHANGE, LWA_ALPHA, LWA_COLORKEY, LoadCursorW, LoadIconW, MB_ICONERROR,
-            MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO, MF_CHECKED, MF_SEPARATOR,
-            MF_STRING, MSG, MessageBoxW, PostQuitMessage, RegisterClassExW, SM_CXVIRTUALSCREEN,
-            SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_RESTORE, SW_SHOW,
-            SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SendMessageW, SetForegroundWindow,
-            SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
-            ShowWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-            TrackPopupMenu, TranslateMessage, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE,
-            WM_ACTIVATE, WM_CLIPBOARDUPDATE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT,
-            WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND,
-            WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT,
-            WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_CAPTION, WS_CLIPCHILDREN, WS_EX_LAYERED,
-            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MINIMIZEBOX,
-            WS_OVERLAPPED, WS_POPUP, WS_SYSMENU,
+            MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO, MF_CHECKED, MF_POPUP,
+            MF_SEPARATOR, MF_STRING, MSG, MessageBoxW, PostQuitMessage, RegisterClassExW,
+            SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE,
+            SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SendMessageW,
+            SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW,
+            SetWindowPos, SetWindowTextW, ShowWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
+            TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WA_INACTIVE,
+            WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CLIPBOARDUPDATE, WM_CLOSE, WM_COMMAND,
+            WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY,
+            WM_DRAWITEM, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+            WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_CAPTION,
+            WS_CLIPCHILDREN, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+            WS_EX_TRANSPARENT, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU,
         },
     },
 };
@@ -118,6 +118,7 @@ const IDM_HISTORY: usize = 2002;
 const IDM_PAUSE: usize = 2003;
 const IDM_EXIT: usize = 2004;
 const IDM_HISTORY_SOURCE_BASE: usize = 3000;
+const IDM_GESTURE_ACTION_BASE: usize = 4000;
 const RESOURCE_TIMER_ID: usize = 2;
 const WM_APP_HISTORY_PREVIEW_READY: u32 = 0x8008;
 static APP_STATE: AtomicPtr<AppState> = AtomicPtr::new(ptr::null_mut());
@@ -158,7 +159,7 @@ struct AppState {
     gesture_recognizer: Recognizer,
     gesture_preview: Option<GestureMatch>,
     last_gesture_preview_at: Option<Instant>,
-    gesture_training_action: GestureAction,
+    gesture_training_id: GestureId,
     gesture_training_points: Vec<GesturePoint>,
     gesture_training_drawing: bool,
     toast_text: String,
@@ -250,7 +251,7 @@ pub fn run() -> Result<()> {
         gesture_recognizer,
         gesture_preview: None,
         last_gesture_preview_at: None,
-        gesture_training_action: GestureAction::SearchSelection,
+        gesture_training_id: GestureId::LetterS,
         gesture_training_points: Vec::with_capacity(512),
         gesture_training_drawing: false,
         toast_text: String::new(),
@@ -776,27 +777,14 @@ unsafe extern "system" fn main_proc(
                     IDC_NAV_RESOURCES => show_settings_page(state, SettingsPage::Resources),
                     IDC_NAV_ABOUT => show_settings_page(state, SettingsPage::About),
                     IDC_OPEN_GITHUB => open_github_profile(state),
-                    IDC_GESTURE_TOPMOST => {
-                        select_gesture_training_action(state, GestureAction::ToggleTopmost)
-                    }
-                    IDC_GESTURE_CLOSE => {
-                        select_gesture_training_action(state, GestureAction::CloseTab)
-                    }
-                    IDC_GESTURE_SEARCH => {
-                        select_gesture_training_action(state, GestureAction::SearchSelection)
-                    }
-                    IDC_GESTURE_COPY => {
-                        select_gesture_training_action(state, GestureAction::CopySelection)
-                    }
-                    IDC_GESTURE_HISTORY => {
-                        select_gesture_training_action(state, GestureAction::OpenHistory)
-                    }
-                    IDC_GESTURE_DESKTOP_LEFT => {
-                        select_gesture_training_action(state, GestureAction::SwitchDesktopLeft)
-                    }
-                    IDC_GESTURE_DESKTOP_RIGHT => {
-                        select_gesture_training_action(state, GestureAction::SwitchDesktopRight)
-                    }
+                    IDC_GESTURE_UP => select_gesture_training_id(state, GestureId::Up),
+                    IDC_GESTURE_L => select_gesture_training_id(state, GestureId::LetterL),
+                    IDC_GESTURE_S => select_gesture_training_id(state, GestureId::LetterS),
+                    IDC_GESTURE_C => select_gesture_training_id(state, GestureId::LetterC),
+                    IDC_GESTURE_V => select_gesture_training_id(state, GestureId::LetterV),
+                    IDC_GESTURE_LEFT => select_gesture_training_id(state, GestureId::Left),
+                    IDC_GESTURE_RIGHT => select_gesture_training_id(state, GestureId::Right),
+                    IDC_GESTURE_BINDING => show_gesture_action_menu(state),
                     IDC_GESTURE_CLEAR => clear_current_gesture_samples(state),
                     id if id as usize == IDM_SETTINGS => unsafe {
                         ShowWindow(hwnd, SW_RESTORE);
@@ -971,7 +959,7 @@ unsafe extern "system" fn main_proc(
             match draw.CtlID as i32 {
                 IDC_SAVE | IDC_OPEN_HISTORY | IDC_CLEAR_HISTORY | IDC_STATUS | IDC_NAV_GENERAL
                 | IDC_NAV_HISTORY | IDC_NAV_GESTURES | IDC_NAV_RESOURCES | IDC_NAV_ABOUT
-                | IDC_OPEN_DATA_DIR | IDC_GESTURE_CLEAR | IDC_OPEN_GITHUB => {
+                | IDC_OPEN_DATA_DIR | IDC_GESTURE_CLEAR | IDC_GESTURE_BINDING | IDC_OPEN_GITHUB => {
                     draw_button(draw);
                     1
                 }
@@ -985,16 +973,9 @@ unsafe extern "system" fn main_proc(
                     draw_toggle(draw);
                     1
                 }
-                IDC_TRIGGER_RIGHT
-                | IDC_TRIGGER_X1
-                | IDC_TRIGGER_X2
-                | IDC_GESTURE_TOPMOST
-                | IDC_GESTURE_CLOSE
-                | IDC_GESTURE_SEARCH
-                | IDC_GESTURE_COPY
-                | IDC_GESTURE_HISTORY
-                | IDC_GESTURE_DESKTOP_LEFT
-                | IDC_GESTURE_DESKTOP_RIGHT => {
+                IDC_TRIGGER_RIGHT | IDC_TRIGGER_X1 | IDC_TRIGGER_X2 | IDC_GESTURE_UP
+                | IDC_GESTURE_L | IDC_GESTURE_S | IDC_GESTURE_C | IDC_GESTURE_V
+                | IDC_GESTURE_LEFT | IDC_GESTURE_RIGHT => {
                     draw_choice(draw);
                     1
                 }
@@ -1223,7 +1204,18 @@ fn paint_gesture_prediction(hdc: *mut c_void, state: &AppState) {
     }
     let label = state
         .gesture_preview
-        .map(|matched| format!("预计：{}", matched.action.preview_label()))
+        .map(|matched| {
+            let action = state
+                .config
+                .read()
+                .expect("config poisoned")
+                .action_for(matched.gesture);
+            format!(
+                "预计：{} → {}",
+                matched.gesture.short_label(),
+                action.label()
+            )
+        })
         .unwrap_or_else(|| "正在识别手势…".to_owned());
     let label = wide(&label);
     let mut text_rect = RECT {
@@ -1455,7 +1447,7 @@ fn show_settings_page(state: &mut AppState, page: SettingsPage) {
     let (title, subtitle) = match page {
         SettingsPage::General => ("常规", "手势与启动"),
         SettingsPage::History => ("剪贴板历史", "记录与管理"),
-        SettingsPage::Gestures => ("个性化手势", "让 Xmouse 适应你的轨迹"),
+        SettingsPage::Gestures => ("手势设置", "轨迹学习与动作绑定"),
         SettingsPage::Resources => ("资源占用", "Xmouse 当前进程"),
         SettingsPage::About => ("关于", "功能、使用与项目"),
     };
@@ -1554,20 +1546,20 @@ fn select_trigger(state: &AppState, trigger: TriggerButton) {
     }
 }
 
-fn gesture_action_control(state: &AppState, action: GestureAction) -> HWND {
-    match action {
-        GestureAction::ToggleTopmost => state.controls.gesture_topmost,
-        GestureAction::CloseTab => state.controls.gesture_close,
-        GestureAction::SearchSelection => state.controls.gesture_search,
-        GestureAction::CopySelection => state.controls.gesture_copy,
-        GestureAction::OpenHistory => state.controls.gesture_history,
-        GestureAction::SwitchDesktopLeft => state.controls.gesture_desktop_left,
-        GestureAction::SwitchDesktopRight => state.controls.gesture_desktop_right,
+fn gesture_control(state: &AppState, gesture: GestureId) -> HWND {
+    match gesture {
+        GestureId::Up => state.controls.gesture.up,
+        GestureId::LetterL => state.controls.gesture.letter_l,
+        GestureId::LetterS => state.controls.gesture.letter_s,
+        GestureId::LetterC => state.controls.gesture.letter_c,
+        GestureId::LetterV => state.controls.gesture.letter_v,
+        GestureId::Left => state.controls.gesture.left,
+        GestureId::Right => state.controls.gesture.right,
     }
 }
 
-fn select_gesture_training_action(state: &mut AppState, action: GestureAction) {
-    state.gesture_training_action = action;
+fn select_gesture_training_id(state: &mut AppState, gesture: GestureId) {
+    state.gesture_training_id = gesture;
     state.gesture_training_points.clear();
     refresh_gesture_training_ui(state);
     unsafe {
@@ -1576,9 +1568,9 @@ fn select_gesture_training_action(state: &mut AppState, action: GestureAction) {
 }
 
 fn refresh_gesture_training_ui(state: &AppState) {
-    for action in GestureAction::ALL {
-        let control = gesture_action_control(state, action);
-        set_check(control, action == state.gesture_training_action);
+    for gesture in GestureId::ALL {
+        let control = gesture_control(state, gesture);
+        set_check(control, gesture == state.gesture_training_id);
         if !control.is_null() {
             unsafe {
                 InvalidateRect(control, ptr::null(), 1);
@@ -1591,18 +1583,173 @@ fn refresh_gesture_training_ui(state: &AppState) {
         .expect("config poisoned")
         .custom_gestures
         .iter()
-        .filter(|sample| sample.action == state.gesture_training_action)
+        .filter(|sample| sample.gesture == state.gesture_training_id)
         .count();
+    let action = state
+        .config
+        .read()
+        .expect("config poisoned")
+        .action_for(state.gesture_training_id);
     set_control_text(
-        state.controls.gesture_status,
+        state.controls.gesture.status,
         &format!(
             "已选择 {} · 已学习 {count}/3 份样本",
-            state.gesture_training_action.short_label()
+            state.gesture_training_id.short_label()
         ),
     );
+    set_control_text(
+        state.controls.gesture.binding,
+        &format!("执行：{}  ▾", action.label()),
+    );
     unsafe {
-        EnableWindow(state.controls.gesture_clear, i32::from(count > 0));
+        EnableWindow(state.controls.gesture.clear, i32::from(count > 0));
+        InvalidateRect(state.controls.gesture.binding, ptr::null(), 1);
     }
+}
+
+fn show_gesture_action_menu(state: &mut AppState) {
+    let selected_gesture = state.gesture_training_id;
+    let selected_action = state
+        .config
+        .read()
+        .expect("config poisoned")
+        .action_for(selected_gesture);
+    let menu = unsafe { CreatePopupMenu() };
+    if menu.is_null() {
+        return;
+    }
+    append_action_menu_item(menu, ActionKind::Disabled, selected_action);
+    unsafe {
+        AppendMenuW(menu, MF_SEPARATOR, 0, ptr::null());
+    }
+    append_action_category(
+        menu,
+        "剪贴板与搜索",
+        &[
+            ActionKind::SearchSelection,
+            ActionKind::CopySelection,
+            ActionKind::OpenHistory,
+            ActionKind::Paste,
+        ],
+        selected_action,
+    );
+    append_action_category(
+        menu,
+        "窗口",
+        &[
+            ActionKind::ToggleTopmost,
+            ActionKind::CloseTab,
+            ActionKind::MinimizeWindow,
+            ActionKind::MaximizeRestore,
+        ],
+        selected_action,
+    );
+    append_action_category(
+        menu,
+        "浏览器",
+        &[ActionKind::BrowserBack, ActionKind::BrowserForward],
+        selected_action,
+    );
+    append_action_category(
+        menu,
+        "桌面",
+        &[
+            ActionKind::SwitchDesktopLeft,
+            ActionKind::SwitchDesktopRight,
+            ActionKind::ShowDesktop,
+            ActionKind::TaskView,
+        ],
+        selected_action,
+    );
+    append_action_category(
+        menu,
+        "媒体与音量",
+        &[
+            ActionKind::VolumeMute,
+            ActionKind::VolumeDown,
+            ActionKind::VolumeUp,
+            ActionKind::MediaPlayPause,
+        ],
+        selected_action,
+    );
+    let mut button_rect = RECT::default();
+    unsafe {
+        GetWindowRect(state.controls.gesture.binding, &mut button_rect);
+        SetForegroundWindow(state.main_hwnd);
+    }
+    let command = unsafe {
+        TrackPopupMenu(
+            menu,
+            TPM_LEFTALIGN | TPM_RETURNCMD | TPM_RIGHTBUTTON,
+            button_rect.left,
+            button_rect.bottom + 4,
+            0,
+            state.main_hwnd,
+            ptr::null(),
+        )
+    } as usize;
+    unsafe {
+        DestroyMenu(menu);
+    }
+    let Some(index) = command.checked_sub(IDM_GESTURE_ACTION_BASE) else {
+        return;
+    };
+    let Some(action) = ActionKind::ALL.get(index).copied() else {
+        return;
+    };
+    if action == selected_action {
+        return;
+    }
+    let mut next = state.config.read().expect("config poisoned").clone();
+    next.set_action(selected_gesture, action);
+    if let Err(error) = save_gesture_config(state, next) {
+        logging::error("保存手势动作映射", &error);
+        post_toast(state.main_hwnd as isize, &format!("保存失败：{error:#}"));
+        return;
+    }
+    refresh_gesture_training_ui(state);
+    post_toast(
+        state.main_hwnd as isize,
+        &format!(
+            "{} 已改为{}",
+            selected_gesture.short_label(),
+            action.label()
+        ),
+    );
+}
+
+fn append_action_category(
+    parent: HMENU,
+    label: &str,
+    actions: &[ActionKind],
+    selected: ActionKind,
+) {
+    let submenu = unsafe { CreatePopupMenu() };
+    if submenu.is_null() {
+        return;
+    }
+    for &action in actions {
+        append_action_menu_item(submenu, action, selected);
+    }
+    let label = wide(label);
+    unsafe {
+        AppendMenuW(parent, MF_POPUP, submenu as usize, label.as_ptr());
+    }
+}
+
+fn append_action_menu_item(menu: HMENU, action: ActionKind, selected: ActionKind) {
+    let Some(index) = ActionKind::ALL
+        .iter()
+        .position(|candidate| *candidate == action)
+    else {
+        return;
+    };
+    append_menu(
+        menu,
+        MF_STRING | if action == selected { MF_CHECKED } else { 0 },
+        IDM_GESTURE_ACTION_BASE + index,
+        action.label(),
+    );
 }
 
 fn append_gesture_training_point(state: &mut AppState, x: i32, y: i32) {
@@ -1644,16 +1791,15 @@ fn finish_gesture_training(state: &mut AppState) {
         .sum();
     if length < 60.0 {
         state.gesture_training_points.clear();
-        set_control_text(state.controls.gesture_status, "轨迹太短，请重新绘制");
+        set_control_text(state.controls.gesture.status, "轨迹太短，请重新绘制");
         post_toast(state.main_hwnd as isize, "轨迹太短，未保存");
         return;
     }
-    let Some(sample) = UserGestureTemplate::from_stroke(
-        state.gesture_training_action,
-        &state.gesture_training_points,
-    ) else {
+    let Some(sample) =
+        UserGestureTemplate::from_stroke(state.gesture_training_id, &state.gesture_training_points)
+    else {
         state.gesture_training_points.clear();
-        set_control_text(state.controls.gesture_status, "轨迹无效，请重新绘制");
+        set_control_text(state.controls.gesture.status, "轨迹无效，请重新绘制");
         return;
     };
 
@@ -1661,14 +1807,14 @@ fn finish_gesture_training(state: &mut AppState) {
     while next
         .custom_gestures
         .iter()
-        .filter(|stored| stored.action == sample.action)
+        .filter(|stored| stored.gesture == sample.gesture)
         .count()
         >= 3
     {
         if let Some(index) = next
             .custom_gestures
             .iter()
-            .position(|stored| stored.action == sample.action)
+            .position(|stored| stored.gesture == sample.gesture)
         {
             next.custom_gestures.remove(index);
         }
@@ -1685,19 +1831,19 @@ fn finish_gesture_training(state: &mut AppState) {
     refresh_gesture_training_ui(state);
     post_toast(
         state.main_hwnd as isize,
-        &format!("已学习 {}", state.gesture_training_action.short_label()),
+        &format!("已学习 {}", state.gesture_training_id.short_label()),
     );
 }
 
 fn clear_current_gesture_samples(state: &mut AppState) {
-    let action = state.gesture_training_action;
+    let gesture = state.gesture_training_id;
     let count = state
         .config
         .read()
         .expect("config poisoned")
         .custom_gestures
         .iter()
-        .filter(|sample| sample.action == action)
+        .filter(|sample| sample.gesture == gesture)
         .count();
     if count == 0 {
         post_toast(state.main_hwnd as isize, "当前动作还没有个性化样本");
@@ -1705,7 +1851,7 @@ fn clear_current_gesture_samples(state: &mut AppState) {
     }
     let prompt = wide(&format!(
         "确定清除 {} 的 {count} 份个性化样本吗？\n清除后仍会使用内置模板。",
-        action.short_label()
+        gesture.short_label()
     ));
     let title = wide("清除个性化手势");
     let answer = unsafe {
@@ -1721,7 +1867,7 @@ fn clear_current_gesture_samples(state: &mut AppState) {
     }
     let mut next = state.config.read().expect("config poisoned").clone();
     next.custom_gestures
-        .retain(|sample| sample.action != action);
+        .retain(|sample| sample.gesture != gesture);
     if let Err(error) = save_gesture_config(state, next) {
         logging::error("清除个性化手势", &error);
         post_toast(state.main_hwnd as isize, &format!("清除失败：{error:#}"));
@@ -1850,6 +1996,7 @@ fn read_config_from_controls(state: &AppState) -> Result<AppConfig> {
         search_url_template: current.search_url_template.clone(),
         autostart: is_checked(state.controls.autostart),
         custom_gestures: current.custom_gestures.clone(),
+        gesture_bindings: current.gesture_bindings.clone(),
         gesture_guard: crate::config::GestureGuardConfig {
             disable_in_fullscreen_apps: is_checked(state.controls.disable_fullscreen_gestures),
             ..current.gesture_guard
@@ -2491,10 +2638,10 @@ fn paint_main_window(hwnd: HWND) {
         SettingsPage::General => &[
             (214, 100, 858, 246, 18),
             (214, 262, 858, 372, 18),
-            (214, 394, 858, 548, 18),
+            (214, 394, 858, 584, 18),
         ],
         SettingsPage::History => &[(214, 100, 858, 246, 18), (214, 260, 858, 426, 18)],
-        SettingsPage::Gestures => &[(214, 100, 858, 288, 18), (214, 300, 858, 620, 18)],
+        SettingsPage::Gestures => &[(214, 100, 858, 270, 18), (214, 278, 858, 632, 18)],
         SettingsPage::Resources => &[
             (214, 104, 522, 244, 18),
             (536, 104, 858, 244, 18),
@@ -2519,13 +2666,13 @@ fn paint_main_window(hwnd: HWND) {
             .expect("config poisoned")
             .custom_gestures
             .iter()
-            .filter(|sample| sample.action == state.gesture_training_action)
+            .filter(|sample| sample.gesture == state.gesture_training_id)
             .count();
         gesture_editor::draw(
             hdc,
             colors,
             state.font_body,
-            state.gesture_training_action,
+            state.gesture_training_id,
             sample_count,
             &state.gesture_training_points,
             state.gesture_training_drawing,

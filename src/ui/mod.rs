@@ -1,5 +1,6 @@
 pub mod format;
 pub mod gesture_editor;
+pub mod gesture_settings;
 pub mod history_popup;
 pub mod history_preview;
 pub mod history_view;

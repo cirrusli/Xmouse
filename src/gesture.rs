@@ -22,75 +22,71 @@ impl Point {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum GestureAction {
-    ToggleTopmost,
-    CloseTab,
-    SearchSelection,
-    CopySelection,
-    OpenHistory,
-    SwitchDesktopLeft,
-    SwitchDesktopRight,
+pub enum GestureId {
+    #[serde(alias = "toggle_topmost")]
+    Up,
+    #[serde(alias = "close_tab")]
+    LetterL,
+    #[serde(alias = "search_selection")]
+    LetterS,
+    #[serde(alias = "copy_selection")]
+    LetterC,
+    #[serde(alias = "open_history")]
+    LetterV,
+    #[serde(alias = "switch_desktop_left")]
+    Left,
+    #[serde(alias = "switch_desktop_right")]
+    Right,
 }
 
-impl GestureAction {
+impl GestureId {
     pub const ALL: [Self; 7] = [
-        Self::ToggleTopmost,
-        Self::CloseTab,
-        Self::SearchSelection,
-        Self::CopySelection,
-        Self::OpenHistory,
-        Self::SwitchDesktopLeft,
-        Self::SwitchDesktopRight,
+        Self::Up,
+        Self::LetterL,
+        Self::LetterS,
+        Self::LetterC,
+        Self::LetterV,
+        Self::Left,
+        Self::Right,
     ];
 
     pub fn short_label(self) -> &'static str {
         match self {
-            Self::ToggleTopmost => "↑ 置顶窗口",
-            Self::CloseTab => "L 关闭页面",
-            Self::SearchSelection => "S 搜索选中内容",
-            Self::CopySelection => "C 复制内容",
-            Self::OpenHistory => "V 剪贴板历史",
-            Self::SwitchDesktopLeft => "← 左侧桌面",
-            Self::SwitchDesktopRight => "→ 右侧桌面",
+            Self::Up => "↑ 上划",
+            Self::LetterL => "L 字形",
+            Self::LetterS => "S 字形",
+            Self::LetterC => "C 字形",
+            Self::LetterV => "V 字形",
+            Self::Left => "← 左划",
+            Self::Right => "→ 右划",
         }
     }
 
     #[cfg(test)]
     pub fn label(self) -> &'static str {
         match self {
-            Self::ToggleTopmost => "置顶切换",
-            Self::CloseTab => "关闭页面",
-            Self::SearchSelection => "搜索选中内容",
-            Self::CopySelection => "复制",
-            Self::OpenHistory => "剪贴板历史",
-            Self::SwitchDesktopLeft => "左侧桌面",
-            Self::SwitchDesktopRight => "右侧桌面",
-        }
-    }
-
-    pub fn preview_label(self) -> &'static str {
-        match self {
-            Self::ToggleTopmost => "↑ · 置顶窗口",
-            Self::CloseTab => "L · 关闭页面",
-            Self::SearchSelection => "S · 搜索选中内容",
-            Self::CopySelection => "C · 复制内容",
-            Self::OpenHistory => "V · 打开剪贴板历史",
-            Self::SwitchDesktopLeft => "← · 切换到左侧桌面",
-            Self::SwitchDesktopRight => "→ · 切换到右侧桌面",
+            Self::Up => "上划",
+            Self::LetterL => "L 字形",
+            Self::LetterS => "S 字形",
+            Self::LetterC => "C 字形",
+            Self::LetterV => "V 字形",
+            Self::Left => "左划",
+            Self::Right => "右划",
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UserGestureTemplate {
-    pub action: GestureAction,
+    #[serde(alias = "action")]
+    pub gesture: GestureId,
     pub points: Vec<Point>,
 }
 
 impl UserGestureTemplate {
-    pub fn from_stroke(action: GestureAction, points: &[Point]) -> Option<Self> {
+    pub fn from_stroke(gesture: GestureId, points: &[Point]) -> Option<Self> {
         Some(Self {
-            action,
+            gesture,
             points: normalized_points(points)?,
         })
     }
@@ -107,13 +103,13 @@ impl UserGestureTemplate {
 
 #[derive(Debug, Clone, Copy)]
 pub struct GestureMatch {
-    pub action: GestureAction,
+    pub gesture: GestureId,
     pub score: f32,
 }
 
 #[derive(Clone)]
 struct Template {
-    action: GestureAction,
+    gesture: GestureId,
     vector: Vec<f32>,
 }
 
@@ -131,10 +127,10 @@ impl Default for Recognizer {
 impl Recognizer {
     pub fn new() -> Self {
         let mut templates = Vec::new();
-        for (action, variants) in template_points() {
+        for (gesture, variants) in template_points() {
             for points in variants {
                 if let Some(vector) = normalize(&points) {
-                    templates.push(Template { action, vector });
+                    templates.push(Template { gesture, vector });
                 }
             }
         }
@@ -149,7 +145,7 @@ impl Recognizer {
             .iter()
             .filter_map(|sample| {
                 normalize(&sample.points).map(|vector| Template {
-                    action: sample.action,
+                    gesture: sample.gesture,
                     vector,
                 })
             })
@@ -158,7 +154,7 @@ impl Recognizer {
 
     pub fn recognize(&self, points: &[Point], threshold: f32) -> Option<GestureMatch> {
         let candidate = normalize(points)?;
-        let mut by_action: Vec<(GestureAction, f32)> = Vec::new();
+        let mut by_gesture: Vec<(GestureId, f32)> = Vec::new();
 
         for template in self
             .built_in_templates
@@ -166,21 +162,21 @@ impl Recognizer {
             .chain(self.user_templates.iter())
         {
             let score = cosine_similarity(&candidate, &template.vector);
-            if let Some((_, best)) = by_action
+            if let Some((_, best)) = by_gesture
                 .iter_mut()
-                .find(|(action, _)| *action == template.action)
+                .find(|(gesture, _)| *gesture == template.gesture)
             {
                 *best = best.max(score);
             } else {
-                by_action.push((template.action, score));
+                by_gesture.push((template.gesture, score));
             }
         }
 
-        by_action.sort_by(|a, b| b.1.total_cmp(&a.1));
-        let (action, score) = *by_action.first()?;
-        let second = by_action.get(1).map(|(_, score)| *score).unwrap_or(-1.0);
+        by_gesture.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let (gesture, score) = *by_gesture.first()?;
+        let second = by_gesture.get(1).map(|(_, score)| *score).unwrap_or(-1.0);
         let margin = score - second;
-        (score >= threshold && margin >= MIN_MARGIN).then_some(GestureMatch { action, score })
+        (score >= threshold && margin >= MIN_MARGIN).then_some(GestureMatch { gesture, score })
     }
 }
 
@@ -316,7 +312,7 @@ fn arc(center: Point, radius_x: f32, radius_y: f32, start: f32, end: f32) -> Vec
         .collect()
 }
 
-fn template_points() -> Vec<(GestureAction, Vec<Vec<Point>>)> {
+fn template_points() -> Vec<(GestureId, Vec<Vec<Point>>)> {
     let up = vec![
         line(&[(50.0, 100.0), (50.0, 0.0)]),
         line(&[(45.0, 100.0), (50.0, 0.0)]),
@@ -368,13 +364,13 @@ fn template_points() -> Vec<(GestureAction, Vec<Vec<Point>>)> {
     ]);
 
     vec![
-        (GestureAction::ToggleTopmost, up),
-        (GestureAction::CloseTab, l),
-        (GestureAction::SearchSelection, vec![s1, s2]),
-        (GestureAction::CopySelection, c),
-        (GestureAction::OpenHistory, v),
-        (GestureAction::SwitchDesktopLeft, desktop_left),
-        (GestureAction::SwitchDesktopRight, desktop_right),
+        (GestureId::Up, up),
+        (GestureId::LetterL, l),
+        (GestureId::LetterS, vec![s1, s2]),
+        (GestureId::LetterC, c),
+        (GestureId::LetterV, v),
+        (GestureId::Left, desktop_left),
+        (GestureId::Right, desktop_right),
     ]
 }
 
@@ -396,12 +392,12 @@ mod tests {
     #[test]
     fn recognizes_all_templates_with_scale_and_jitter() {
         let recognizer = Recognizer::new();
-        for (action, variants) in template_points() {
+        for (gesture, variants) in template_points() {
             let candidate = jitter(&variants[0], 0.4);
             let matched = recognizer
                 .recognize(&candidate, 0.80)
-                .unwrap_or_else(|| panic!("failed to recognize {}", action.label()));
-            assert_eq!(matched.action, action);
+                .unwrap_or_else(|| panic!("failed to recognize {}", gesture.label()));
+            assert_eq!(matched.gesture, gesture);
             assert!(matched.score >= 0.80);
         }
     }
@@ -426,8 +422,8 @@ mod tests {
             (90.0, 75.0),
             (120.0, 10.0),
         ]);
-        let sample = UserGestureTemplate::from_stroke(GestureAction::SearchSelection, &zigzag)
-            .expect("valid sample");
+        let sample =
+            UserGestureTemplate::from_stroke(GestureId::LetterS, &zigzag).expect("valid sample");
         assert!(sample.is_valid());
 
         let mut recognizer = Recognizer::new();
@@ -435,13 +431,13 @@ mod tests {
         let matched = recognizer
             .recognize(&jitter(&zigzag, 0.15), 0.82)
             .expect("personalized gesture should match");
-        assert_eq!(matched.action, GestureAction::SearchSelection);
+        assert_eq!(matched.gesture, GestureId::LetterS);
     }
 
     #[test]
     fn normalized_personalized_template_remains_valid() {
         let vertical = line(&[(20.0, 120.0), (22.0, 65.0), (20.0, 5.0)]);
-        let sample = UserGestureTemplate::from_stroke(GestureAction::ToggleTopmost, &vertical)
+        let sample = UserGestureTemplate::from_stroke(GestureId::Up, &vertical)
             .expect("valid personalized stroke");
         assert_eq!(sample.points.len(), SAMPLE_COUNT);
         assert!(sample.is_valid());
@@ -454,12 +450,22 @@ mod tests {
         let right = line(&[(20.0, 46.0), (180.0, 42.0)]);
 
         assert_eq!(
-            recognizer.recognize(&left, 0.82).unwrap().action,
-            GestureAction::SwitchDesktopLeft
+            recognizer.recognize(&left, 0.82).unwrap().gesture,
+            GestureId::Left
         );
         assert_eq!(
-            recognizer.recognize(&right, 0.82).unwrap().action,
-            GestureAction::SwitchDesktopRight
+            recognizer.recognize(&right, 0.82).unwrap().gesture,
+            GestureId::Right
         );
+    }
+
+    #[test]
+    fn legacy_personalized_sample_names_deserialize_to_gesture_ids() {
+        let json = r#"{
+            "action": "search_selection",
+            "points": []
+        }"#;
+        let sample: UserGestureTemplate = serde_json::from_str(json).unwrap();
+        assert_eq!(sample.gesture, GestureId::LetterS);
     }
 }

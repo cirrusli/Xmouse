@@ -1,5 +1,6 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
+mod action;
 mod actions;
 mod app;
 mod clipboard;

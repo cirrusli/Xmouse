@@ -1,5 +1,5 @@
 use super::theme::{ACCENT_COLOR, Palette};
-use crate::gesture::{GestureAction, Point};
+use crate::gesture::{GestureId, Point};
 use std::{ffi::c_void, ptr};
 use windows_sys::Win32::{
     Foundation::RECT,
@@ -12,9 +12,9 @@ use windows_sys::Win32::{
 
 pub const CANVAS_RECT: RECT = RECT {
     left: 232,
-    top: 310,
+    top: 330,
     right: 832,
-    bottom: 546,
+    bottom: 558,
 };
 
 pub fn contains(x: i32, y: i32) -> bool {
@@ -26,7 +26,7 @@ pub fn draw(
     hdc: *mut c_void,
     colors: Palette,
     font: HFONT,
-    action: GestureAction,
+    gesture: GestureId,
     sample_count: usize,
     points: &[Point],
     drawing: bool,
@@ -95,11 +95,11 @@ pub fn draw(
     }
 
     let message = if drawing {
-        format!("正在记录 {}", action.short_label())
+        format!("正在记录 {}", gesture.short_label())
     } else if points.is_empty() {
         format!(
             "按住左键，按你的习惯绘制 {}（已学习 {sample_count}/3）",
-            action.short_label()
+            gesture.short_label()
         )
     } else {
         "松开后已保存；继续绘制可再添加一份样本".to_owned()

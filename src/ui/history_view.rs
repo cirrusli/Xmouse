@@ -5,11 +5,12 @@ use super::{
 use crate::storage::ClipItem;
 use std::{ffi::c_void, mem};
 use windows_sys::Win32::{
-    Foundation::RECT,
+    Foundation::{RECT, SIZE},
     Graphics::Gdi::{
         BITMAPINFO, BITMAPINFOHEADER, CreateSolidBrush, DIB_RGB_COLORS, DT_END_ELLIPSIS, DT_LEFT,
-        DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW, FillRect, HFONT, SRCCOPY,
-        SelectObject, SetBkMode, SetTextColor, StretchDIBits, TRANSPARENT,
+        DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW, FillRect,
+        GetTextExtentPoint32W, HFONT, SRCCOPY, SelectObject, SetBkMode, SetTextColor,
+        StretchDIBits, TRANSPARENT,
     },
     UI::Controls::{DRAWITEMSTRUCT, ODS_SELECTED},
 };
@@ -23,12 +24,17 @@ pub struct Thumbnail {
 pub struct HistoryView {
     pub item: ClipItem,
     thumbnail: Option<Thumbnail>,
+    search_query: String,
 }
 
 impl HistoryView {
-    pub fn new(item: ClipItem) -> Self {
+    pub fn new(item: ClipItem, search_query: &str) -> Self {
         let thumbnail = item.thumbnail_png.as_deref().and_then(decode_thumbnail);
-        Self { item, thumbnail }
+        Self {
+            item,
+            thumbnail,
+            search_query: search_query.trim().to_owned(),
+        }
     }
 }
 
@@ -101,13 +107,21 @@ pub fn draw_history_item(draw: &DRAWITEMSTRUCT, view: &HistoryView, colors: Pale
     };
 
     let previous_font = unsafe { SelectObject(draw.hDC, font) };
-    let text = wide(&view.item.display_text());
+    let display_text = view.item.display_text();
+    let text = wide(&display_text);
     let mut first_line = RECT {
         left: content_left,
         top: draw.rcItem.top + 7,
         right: draw.rcItem.right - if view.item.pinned { 68 } else { 8 },
         bottom: draw.rcItem.top + 35,
     };
+    draw_search_highlight(
+        draw.hDC,
+        &first_line,
+        &display_text,
+        &view.search_query,
+        colors.highlight,
+    );
     unsafe {
         DrawTextW(
             draw.hDC,
@@ -156,13 +170,21 @@ pub fn draw_history_item(draw: &DRAWITEMSTRUCT, view: &HistoryView, colors: Pale
             view.item.byte_size.div_ceil(1024)
         )
     };
-    let source = wide(&source);
+    let source_text = source;
+    let source = wide(&source_text);
     let mut second_line = RECT {
         left: content_left,
         top: draw.rcItem.top + 35,
         right: draw.rcItem.right - 8,
         bottom: draw.rcItem.bottom - 4,
     };
+    draw_search_highlight(
+        draw.hDC,
+        &second_line,
+        &source_text,
+        &view.search_query,
+        colors.highlight,
+    );
     unsafe {
         DrawTextW(
             draw.hDC,
@@ -173,6 +195,46 @@ pub fn draw_history_item(draw: &DRAWITEMSTRUCT, view: &HistoryView, colors: Pale
         );
         SelectObject(draw.hDC, previous_font);
     }
+}
+
+fn draw_search_highlight(hdc: *mut c_void, line: &RECT, text: &str, query: &str, color: u32) {
+    let Some((start, end)) = case_insensitive_match(text, query) else {
+        return;
+    };
+    let prefix: Vec<u16> = text[..start].encode_utf16().collect();
+    let matched: Vec<u16> = text[start..end].encode_utf16().collect();
+    let mut prefix_size = SIZE::default();
+    let mut match_size = SIZE::default();
+    unsafe {
+        GetTextExtentPoint32W(hdc, prefix.as_ptr(), prefix.len() as i32, &mut prefix_size);
+        GetTextExtentPoint32W(hdc, matched.as_ptr(), matched.len() as i32, &mut match_size);
+    }
+    let left = line.left + prefix_size.cx;
+    if left >= line.right || match_size.cx <= 0 {
+        return;
+    }
+    let highlight = RECT {
+        left,
+        top: line.top + 4,
+        right: (left + match_size.cx).min(line.right),
+        bottom: line.bottom - 4,
+    };
+    let brush = unsafe { CreateSolidBrush(color) };
+    unsafe {
+        FillRect(hdc, &highlight, brush);
+        DeleteObject(brush);
+    }
+}
+
+fn case_insensitive_match(text: &str, query: &str) -> Option<(usize, usize)> {
+    if query.is_empty() {
+        return None;
+    }
+    let folded_text = text.to_lowercase();
+    let folded_query = query.to_lowercase();
+    let start = folded_text.find(&folded_query)?;
+    let end = start + folded_query.len();
+    (text.is_char_boundary(start) && text.is_char_boundary(end)).then_some((start, end))
 }
 
 fn decode_thumbnail(png: &[u8]) -> Option<Thumbnail> {
@@ -210,4 +272,19 @@ fn decode_thumbnail(png: &[u8]) -> Option<Thumbnail> {
 
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::case_insensitive_match;
+
+    #[test]
+    fn search_highlight_matches_ascii_case_and_chinese() {
+        assert_eq!(case_insensitive_match("MSedge.exe", "edge"), Some((2, 6)));
+        assert_eq!(
+            case_insensitive_match("复制中文内容", "中文"),
+            Some((6, 12))
+        );
+        assert_eq!(case_insensitive_match("图片", "文本"), None);
+    }
 }

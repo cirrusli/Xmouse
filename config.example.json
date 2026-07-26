@@ -17,6 +17,7 @@
   },
   "history": {
     "capture": true,
+    "auto_paste": true,
     "encrypt_content": false,
     "max_items": 200,
     "max_disk_mib": 256,

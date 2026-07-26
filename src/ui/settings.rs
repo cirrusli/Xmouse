@@ -40,6 +40,7 @@ pub const IDC_OPEN_GITHUB: i32 = 1034;
 pub const IDC_GESTURE_DESKTOP_LEFT: i32 = 1035;
 pub const IDC_GESTURE_DESKTOP_RIGHT: i32 = 1036;
 pub const IDC_DISABLE_FULLSCREEN_GESTURES: i32 = 1037;
+pub const IDC_HISTORY_AUTO_PASTE: i32 = 1038;
 
 const SS_RIGHT_STYLE: u32 = 2;
 
@@ -77,6 +78,7 @@ pub struct Controls {
     pub trigger_x2: HWND,
     pub autostart: HWND,
     pub capture: HWND,
+    pub history_auto_paste: HWND,
     pub encrypt_content: HWND,
     pub history_usage: HWND,
     pub resource_cpu: HWND,
@@ -121,6 +123,7 @@ impl Default for Controls {
             trigger_x2: ptr::null_mut(),
             autostart: ptr::null_mut(),
             capture: ptr::null_mut(),
+            history_auto_paste: ptr::null_mut(),
             encrypt_content: ptr::null_mut(),
             history_usage: ptr::null_mut(),
             resource_cpu: ptr::null_mut(),
@@ -372,6 +375,18 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
         IDC_ENCRYPT_CONTENT,
     );
     history_page.push(controls.encrypt_content);
+    controls.history_auto_paste = builder.control(
+        "BUTTON",
+        "选择后自动粘贴",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        0,
+        232,
+        194,
+        270,
+        34,
+        IDC_HISTORY_AUTO_PASTE,
+    );
+    history_page.push(controls.history_auto_paste);
 
     let actions_title = builder.label("管理", 232, 260, 160, 26);
     set_control_font(actions_title, fonts.section);

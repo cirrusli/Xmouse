@@ -17,6 +17,10 @@ pub const IDC_HISTORY_COPY: i32 = 1103;
 pub const IDC_HISTORY_DELETE: i32 = 1104;
 pub const IDC_HISTORY_CLEAR: i32 = 1105;
 pub const IDC_HISTORY_PIN: i32 = 1106;
+pub const IDC_HISTORY_FILTER_ALL: i32 = 1107;
+pub const IDC_HISTORY_FILTER_TEXT: i32 = 1108;
+pub const IDC_HISTORY_FILTER_IMAGE: i32 = 1109;
+pub const IDC_HISTORY_FILTER_SOURCE: i32 = 1110;
 
 const SS_RIGHT_STYLE: u32 = 2;
 const EM_SETCUEBANNER: u32 = 0x1501;
@@ -25,6 +29,10 @@ pub struct Controls {
     pub search: HWND,
     pub list: HWND,
     pub usage: HWND,
+    pub filter_all: HWND,
+    pub filter_text: HWND,
+    pub filter_image: HWND,
+    pub filter_source: HWND,
     pub pin: HWND,
     pub copy: HWND,
     pub delete: HWND,
@@ -58,6 +66,10 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts, dark: bool) -> Controls {
         38,
         IDC_HISTORY_SEARCH,
     );
+    let filter_all = filter_button(&builder, "全部", 24, 64, IDC_HISTORY_FILTER_ALL);
+    let filter_text = filter_button(&builder, "文本", 96, 64, IDC_HISTORY_FILTER_TEXT);
+    let filter_image = filter_button(&builder, "图片", 168, 64, IDC_HISTORY_FILTER_IMAGE);
+    let filter_source = filter_button(&builder, "所有应用  ▾", 382, 214, IDC_HISTORY_FILTER_SOURCE);
     let list = builder.control(
         "LISTBOX",
         "",
@@ -71,9 +83,9 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts, dark: bool) -> Controls {
             | LBS_HASSTRINGS as u32,
         0,
         24,
-        150,
+        198,
         572,
-        326,
+        278,
         IDC_HISTORY_LIST,
     );
     let pin = button(&builder, "置顶", 244, IDC_HISTORY_PIN);
@@ -82,7 +94,7 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts, dark: bool) -> Controls {
     let clear = button(&builder, "清空", 510, IDC_HISTORY_CLEAR);
 
     round_control(search, 572, 38, 16);
-    round_control(list, 572, 326, 14);
+    round_control(list, 572, 278, 14);
     unsafe {
         SendMessageW(list, LB_SETITEMHEIGHT, 0, 64);
         let cue = wide("搜索剪贴板内容或来源程序");
@@ -95,11 +107,29 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts, dark: bool) -> Controls {
         search,
         list,
         usage,
+        filter_all,
+        filter_text,
+        filter_image,
+        filter_source,
         pin,
         copy,
         delete,
         clear,
     }
+}
+
+fn filter_button(builder: &ControlFactory, text: &str, x: i32, width: i32, id: i32) -> HWND {
+    builder.control(
+        "BUTTON",
+        text,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        0,
+        x,
+        150,
+        width,
+        34,
+        id,
+    )
 }
 
 fn button(builder: &ControlFactory, text: &str, x: i32, id: i32) -> HWND {

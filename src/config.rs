@@ -28,6 +28,7 @@ pub enum TriggerButton {
 #[serde(default)]
 pub struct HistoryConfig {
     pub capture: bool,
+    pub auto_paste: bool,
     pub encrypt_content: bool,
     pub max_items: usize,
     pub max_disk_mib: u64,
@@ -41,6 +42,7 @@ impl Default for HistoryConfig {
     fn default() -> Self {
         Self {
             capture: true,
+            auto_paste: true,
             encrypt_content: false,
             max_items: 200,
             max_disk_mib: 256,
@@ -249,6 +251,7 @@ mod tests {
         assert!(config.custom_gestures.is_empty());
         assert!(config.gesture_guard.disable_in_fullscreen_apps);
         assert!(config.gesture_guard.excluded_processes.is_empty());
+        assert!(config.history.auto_paste);
         config.validate().expect("default remains valid");
     }
 

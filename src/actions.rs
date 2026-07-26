@@ -220,6 +220,11 @@ fn send_ctrl_key(key: u16) -> Result<()> {
     Ok(())
 }
 
+pub fn paste_into_target(target_hwnd: isize) -> Result<()> {
+    activate_target(target_hwnd as HWND)?;
+    send_ctrl_key(b'V' as u16)
+}
+
 fn send_virtual_desktop_switch(direction: u16) -> Result<()> {
     let mut inputs = [
         keyboard_input(VK_LWIN, 0),

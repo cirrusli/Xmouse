@@ -1,5 +1,5 @@
 use crate::{
-    actions::{post_toast, run_worker},
+    actions::{paste_into_target, post_toast, run_worker},
     clipboard::ClipboardService,
     config::{self, AppConfig, TriggerButton},
     gesture::{
@@ -85,13 +85,13 @@ use windows_sys::Win32::{
             GW_OWNER, GWLP_USERDATA, GetAncestor, GetClientRect, GetCursorPos, GetForegroundWindow,
             GetMessageW, GetSystemMetrics, GetWindow, GetWindowLongPtrW, GetWindowRect,
             GetWindowTextLengthW, GetWindowTextW, HMENU, HTTRANSPARENT, HWND_TOPMOST, IDC_ARROW,
-            IDI_APPLICATION, IDYES, IsWindowVisible, KillTimer, LB_ADDSTRING, LB_GETCURSEL,
-            LB_ITEMFROMPOINT, LB_RESETCONTENT, LB_SETCURSEL, LBN_DBLCLK, LBN_SELCHANGE, LWA_ALPHA,
-            LWA_COLORKEY, LoadCursorW, LoadIconW, MB_ICONERROR, MB_ICONINFORMATION,
-            MB_ICONQUESTION, MB_OK, MB_YESNO, MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG,
-            MessageBoxW, PostQuitMessage, RegisterClassExW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-            SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE,
-            SWP_NOACTIVATE, SWP_SHOWWINDOW, SendMessageW, SetForegroundWindow,
+            IDI_APPLICATION, IDYES, IsWindow, IsWindowVisible, KillTimer, LB_ADDSTRING,
+            LB_GETCURSEL, LB_ITEMFROMPOINT, LB_RESETCONTENT, LB_SETCURSEL, LBN_DBLCLK,
+            LBN_SELCHANGE, LWA_ALPHA, LWA_COLORKEY, LoadCursorW, LoadIconW, MB_ICONERROR,
+            MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO, MF_CHECKED, MF_SEPARATOR,
+            MF_STRING, MSG, MessageBoxW, PostQuitMessage, RegisterClassExW, SM_CXVIRTUALSCREEN,
+            SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_RESTORE, SW_SHOW,
+            SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SendMessageW, SetForegroundWindow,
             SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
             ShowWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
             TrackPopupMenu, TranslateMessage, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE,
@@ -117,6 +117,7 @@ const IDM_SETTINGS: usize = 2001;
 const IDM_HISTORY: usize = 2002;
 const IDM_PAUSE: usize = 2003;
 const IDM_EXIT: usize = 2004;
+const IDM_HISTORY_SOURCE_BASE: usize = 3000;
 const RESOURCE_TIMER_ID: usize = 2;
 const WM_APP_HISTORY_PREVIEW_READY: u32 = 0x8008;
 static APP_STATE: AtomicPtr<AppState> = AtomicPtr::new(ptr::null_mut());
@@ -132,6 +133,10 @@ struct AppState {
     history_search: HWND,
     history_list: HWND,
     history_usage: HWND,
+    history_filter_all: HWND,
+    history_filter_text: HWND,
+    history_filter_image: HWND,
+    history_filter_source: HWND,
     history_pin: HWND,
     history_copy: HWND,
     history_delete: HWND,
@@ -158,6 +163,8 @@ struct AppState {
     gesture_training_drawing: bool,
     toast_text: String,
     history_items: Vec<HistoryView>,
+    history_kind_filter: Option<ClipKind>,
+    history_source_filter: Option<String>,
     history_origin: isize,
     tray_added: bool,
     font_body: HFONT,
@@ -218,6 +225,10 @@ pub fn run() -> Result<()> {
         history_search: ptr::null_mut(),
         history_list: ptr::null_mut(),
         history_usage: ptr::null_mut(),
+        history_filter_all: ptr::null_mut(),
+        history_filter_text: ptr::null_mut(),
+        history_filter_image: ptr::null_mut(),
+        history_filter_source: ptr::null_mut(),
         history_pin: ptr::null_mut(),
         history_copy: ptr::null_mut(),
         history_delete: ptr::null_mut(),
@@ -244,6 +255,8 @@ pub fn run() -> Result<()> {
         gesture_training_drawing: false,
         toast_text: String::new(),
         history_items: Vec::new(),
+        history_kind_filter: None,
+        history_source_filter: None,
         history_origin: 0,
         tray_added: false,
         font_body,
@@ -716,7 +729,8 @@ unsafe extern "system" fn main_proc(
                     | IDC_CAPTURE
                     | IDC_ENCRYPT_CONTENT
                     | IDC_DARK_MODE
-                    | IDC_DISABLE_FULLSCREEN_GESTURES => {
+                    | IDC_DISABLE_FULLSCREEN_GESTURES
+                    | IDC_HISTORY_AUTO_PASTE => {
                         let control = match id {
                             IDC_ENABLED => state.controls.enabled,
                             IDC_AUTOSTART => state.controls.autostart,
@@ -726,6 +740,7 @@ unsafe extern "system" fn main_proc(
                             IDC_DISABLE_FULLSCREEN_GESTURES => {
                                 state.controls.disable_fullscreen_gestures
                             }
+                            IDC_HISTORY_AUTO_PASTE => state.controls.history_auto_paste,
                             _ => ptr::null_mut(),
                         };
                         toggle_check(control);
@@ -965,7 +980,8 @@ unsafe extern "system" fn main_proc(
                 | IDC_CAPTURE
                 | IDC_ENCRYPT_CONTENT
                 | IDC_DARK_MODE
-                | IDC_DISABLE_FULLSCREEN_GESTURES => {
+                | IDC_DISABLE_FULLSCREEN_GESTURES
+                | IDC_HISTORY_AUTO_PASTE => {
                     draw_toggle(draw);
                     1
                 }
@@ -1055,10 +1071,15 @@ unsafe extern "system" fn history_proc(
                 state.history_search = controls.search;
                 state.history_list = controls.list;
                 state.history_usage = controls.usage;
+                state.history_filter_all = controls.filter_all;
+                state.history_filter_text = controls.filter_text;
+                state.history_filter_image = controls.filter_image;
+                state.history_filter_source = controls.filter_source;
                 state.history_pin = controls.pin;
                 state.history_copy = controls.copy;
                 state.history_delete = controls.delete;
                 state.history_clear = controls.clear;
+                refresh_history_filter_controls(state);
             }
             0
         }
@@ -1077,6 +1098,12 @@ unsafe extern "system" fn history_proc(
                     IDC_HISTORY_LIST if notification == LBN_SELCHANGE as u16 => {
                         refresh_pin_button(state)
                     }
+                    IDC_HISTORY_FILTER_ALL => set_history_kind_filter(state, None),
+                    IDC_HISTORY_FILTER_TEXT => set_history_kind_filter(state, Some(ClipKind::Text)),
+                    IDC_HISTORY_FILTER_IMAGE => {
+                        set_history_kind_filter(state, Some(ClipKind::Image))
+                    }
+                    IDC_HISTORY_FILTER_SOURCE => show_history_source_menu(state),
                     IDC_HISTORY_PIN => toggle_selected_history_pin(state),
                     IDC_HISTORY_COPY => copy_selected_history(state),
                     IDC_HISTORY_DELETE => delete_selected_history(state),
@@ -1102,9 +1129,19 @@ unsafe extern "system" fn history_proc(
                 1
             } else if matches!(
                 draw.CtlID as i32,
-                IDC_HISTORY_PIN | IDC_HISTORY_COPY | IDC_HISTORY_DELETE | IDC_HISTORY_CLEAR
+                IDC_HISTORY_PIN
+                    | IDC_HISTORY_COPY
+                    | IDC_HISTORY_DELETE
+                    | IDC_HISTORY_CLEAR
+                    | IDC_HISTORY_FILTER_SOURCE
             ) {
                 draw_button(draw);
+                1
+            } else if matches!(
+                draw.CtlID as i32,
+                IDC_HISTORY_FILTER_ALL | IDC_HISTORY_FILTER_TEXT | IDC_HISTORY_FILTER_IMAGE
+            ) {
+                draw_choice(draw);
                 1
             } else {
                 unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
@@ -1468,6 +1505,7 @@ fn load_config_into_controls(state: &mut AppState) {
         config.gesture_guard.disable_in_fullscreen_apps,
     );
     set_check(state.controls.capture, config.history.capture);
+    set_check(state.controls.history_auto_paste, config.history.auto_paste);
     set_check(
         state.controls.encrypt_content,
         config.history.encrypt_content,
@@ -1776,6 +1814,10 @@ fn refresh_theme_resources(state: &mut AppState) {
             state.history_search,
             state.history_list,
             state.history_usage,
+            state.history_filter_all,
+            state.history_filter_text,
+            state.history_filter_image,
+            state.history_filter_source,
         ])
     {
         if !control.is_null() {
@@ -1814,6 +1856,7 @@ fn read_config_from_controls(state: &AppState) -> Result<AppConfig> {
         },
         history: crate::config::HistoryConfig {
             capture: is_checked(state.controls.capture),
+            auto_paste: is_checked(state.controls.history_auto_paste),
             encrypt_content: is_checked(state.controls.encrypt_content),
             ..current.history
         },
@@ -1898,9 +1941,16 @@ fn rebuild_history(state: &mut AppState, query: &str) {
 
 fn rebuild_history_with_selection(state: &mut AppState, query: &str, selected_id: Option<i64>) {
     clear_history_hover(state);
-    match state.storage.list(query) {
+    match state.storage.list_filtered(
+        query,
+        state.history_kind_filter,
+        state.history_source_filter.as_deref(),
+    ) {
         Ok(items) => {
-            state.history_items = items.into_iter().map(HistoryView::new).collect();
+            state.history_items = items
+                .into_iter()
+                .map(|item| HistoryView::new(item, query))
+                .collect();
             unsafe {
                 SendMessageW(state.history_list, LB_RESETCONTENT, 0, 0);
             }
@@ -1931,6 +1981,124 @@ fn rebuild_history_with_selection(state: &mut AppState, query: &str, selected_id
             &format!("读取历史失败：{error:#}"),
         ),
     }
+}
+
+fn set_history_kind_filter(state: &mut AppState, filter: Option<ClipKind>) {
+    if state.history_kind_filter == filter {
+        return;
+    }
+    state.history_kind_filter = filter;
+    refresh_history_filter_controls(state);
+    let query = window_text(state.history_search);
+    rebuild_history(state, &query);
+}
+
+fn refresh_history_filter_controls(state: &AppState) {
+    for (control, selected) in [
+        (
+            state.history_filter_all,
+            state.history_kind_filter.is_none(),
+        ),
+        (
+            state.history_filter_text,
+            state.history_kind_filter == Some(ClipKind::Text),
+        ),
+        (
+            state.history_filter_image,
+            state.history_kind_filter == Some(ClipKind::Image),
+        ),
+    ] {
+        set_check(control, selected);
+        unsafe {
+            InvalidateRect(control, ptr::null(), 1);
+        }
+    }
+    let source_label = state
+        .history_source_filter
+        .as_deref()
+        .map(|source| format!("应用：{source}  ▾"))
+        .unwrap_or_else(|| "所有应用  ▾".to_owned());
+    set_control_text(state.history_filter_source, &source_label);
+    unsafe {
+        InvalidateRect(state.history_filter_source, ptr::null(), 1);
+    }
+}
+
+fn show_history_source_menu(state: &mut AppState) {
+    let sources = match state.storage.sources() {
+        Ok(sources) => sources,
+        Err(error) => {
+            post_toast(
+                state.main_hwnd as isize,
+                &format!("读取来源应用失败：{error:#}"),
+            );
+            return;
+        }
+    };
+    let menu = unsafe { CreatePopupMenu() };
+    if menu.is_null() {
+        return;
+    }
+    append_menu(
+        menu,
+        MF_STRING
+            | if state.history_source_filter.is_none() {
+                MF_CHECKED
+            } else {
+                0
+            },
+        IDM_HISTORY_SOURCE_BASE,
+        "所有应用",
+    );
+    if !sources.is_empty() {
+        unsafe {
+            AppendMenuW(menu, MF_SEPARATOR, 0, ptr::null());
+        }
+    }
+    for (index, source) in sources.iter().enumerate() {
+        let checked = state
+            .history_source_filter
+            .as_deref()
+            .is_some_and(|selected| selected.eq_ignore_ascii_case(source));
+        append_menu(
+            menu,
+            MF_STRING | if checked { MF_CHECKED } else { 0 },
+            IDM_HISTORY_SOURCE_BASE + index + 1,
+            source,
+        );
+    }
+    let mut button_rect = RECT::default();
+    unsafe {
+        GetWindowRect(state.history_filter_source, &mut button_rect);
+        SetForegroundWindow(state.history_hwnd);
+    }
+    let command = unsafe {
+        TrackPopupMenu(
+            menu,
+            TPM_LEFTALIGN | TPM_RETURNCMD | TPM_RIGHTBUTTON,
+            button_rect.left,
+            button_rect.bottom + 4,
+            0,
+            state.history_hwnd,
+            ptr::null(),
+        )
+    } as usize;
+    unsafe {
+        DestroyMenu(menu);
+    }
+    if command == 0 {
+        return;
+    }
+    state.history_source_filter = if command == IDM_HISTORY_SOURCE_BASE {
+        None
+    } else {
+        sources
+            .get(command.saturating_sub(IDM_HISTORY_SOURCE_BASE + 1))
+            .cloned()
+    };
+    refresh_history_filter_controls(state);
+    let query = window_text(state.history_search);
+    rebuild_history(state, &query);
 }
 
 fn update_history_hover(state: &mut AppState, position: LPARAM) {
@@ -2035,14 +2203,41 @@ fn copy_selected_history(state: &mut AppState) {
         .and_then(|_| state.storage.touch(id))
     {
         Ok(()) => {
-            hide_history(state);
-            post_toast(state.main_hwnd as isize, "已复制历史内容");
+            let auto_paste = state
+                .config
+                .read()
+                .expect("config poisoned")
+                .history
+                .auto_paste;
+            if auto_paste && let Some(target) = history_paste_target(state) {
+                dismiss_history(state);
+                match paste_into_target(target) {
+                    Ok(()) => post_toast(state.main_hwnd as isize, "已粘贴历史内容"),
+                    Err(error) => post_toast(
+                        state.main_hwnd as isize,
+                        &format!("内容已复制，自动粘贴失败：{error:#}"),
+                    ),
+                }
+            } else {
+                hide_history(state);
+                post_toast(state.main_hwnd as isize, "已复制历史内容");
+            }
         }
         Err(error) => post_toast(
             state.main_hwnd as isize,
             &format!("复制历史失败：{error:#}"),
         ),
     }
+}
+
+fn history_paste_target(state: &AppState) -> Option<isize> {
+    let origin = state.history_origin as HWND;
+    if origin.is_null() || unsafe { IsWindow(origin) } == 0 {
+        return None;
+    }
+    let root = unsafe { GetAncestor(origin, GA_ROOT) };
+    let root = if root.is_null() { origin } else { root };
+    (root != state.main_hwnd && root != state.history_hwnd).then_some(root as isize)
 }
 
 fn toggle_selected_history_pin(state: &mut AppState) {
@@ -2298,7 +2493,7 @@ fn paint_main_window(hwnd: HWND) {
             (214, 262, 858, 372, 18),
             (214, 394, 858, 548, 18),
         ],
-        SettingsPage::History => &[(214, 100, 858, 218, 18), (214, 244, 858, 410, 18)],
+        SettingsPage::History => &[(214, 100, 858, 246, 18), (214, 260, 858, 426, 18)],
         SettingsPage::Gestures => &[(214, 100, 858, 288, 18), (214, 300, 858, 620, 18)],
         SettingsPage::Resources => &[
             (214, 104, 522, 244, 18),
@@ -2646,6 +2841,7 @@ fn show_tray_menu(state: &mut AppState) {
     }
     append_menu(menu, MF_STRING, IDM_EXIT, "退出 Xmouse");
     let mut point = POINT::default();
+    let origin = unsafe { GetForegroundWindow() };
     unsafe {
         GetCursorPos(&mut point);
         SetForegroundWindow(state.main_hwnd);
@@ -2661,7 +2857,9 @@ fn show_tray_menu(state: &mut AppState) {
             ptr::null(),
         )
     };
-    if command != 0 {
+    if command as usize == IDM_HISTORY {
+        show_history(state, origin as isize);
+    } else if command != 0 {
         unsafe {
             SendMessageW(state.main_hwnd, WM_COMMAND, command as WPARAM, 0);
         }

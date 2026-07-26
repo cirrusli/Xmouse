@@ -20,6 +20,7 @@ pub struct Palette {
     pub sidebar: COLORREF,
     pub hover: COLORREF,
     pub selected: COLORREF,
+    pub highlight: COLORREF,
 }
 
 pub fn palette(dark: bool) -> Palette {
@@ -33,6 +34,7 @@ pub fn palette(dark: bool) -> Palette {
             sidebar: rgb(22, 25, 30),
             hover: rgb(42, 47, 56),
             selected: rgb(32, 48, 76),
+            highlight: rgb(96, 66, 18),
         }
     } else {
         Palette {
@@ -44,6 +46,7 @@ pub fn palette(dark: bool) -> Palette {
             sidebar: rgb(243, 245, 248),
             hover: rgb(238, 242, 247),
             selected: rgb(239, 246, 255),
+            highlight: rgb(254, 240, 138),
         }
     }
 }

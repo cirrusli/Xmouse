@@ -421,7 +421,17 @@ impl Storage {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn list(&self, query: &str) -> Result<Vec<ClipItem>> {
+        self.list_filtered(query, None, None)
+    }
+
+    pub fn list_filtered(
+        &self,
+        query: &str,
+        kind_filter: Option<ClipKind>,
+        source_filter: Option<&str>,
+    ) -> Result<Vec<ClipItem>> {
         let connection = self.connect()?;
         let mut statement = connection.prepare(
             "
@@ -442,6 +452,13 @@ impl Storage {
             let Some(kind) = ClipKind::parse(&kind_text) else {
                 continue;
             };
+            if kind_filter.is_some_and(|filter| filter != kind) {
+                continue;
+            }
+            let source_exe: String = row.get(4)?;
+            if source_filter.is_some_and(|filter| !source_exe.eq_ignore_ascii_case(filter)) {
+                continue;
+            }
             let protected_text: Option<Vec<u8>> = row.get(2)?;
             let protected_thumbnail: Option<Vec<u8>> = row.get(3)?;
             let encoding_text: String = row.get(9)?;
@@ -465,7 +482,6 @@ impl Storage {
                     .transpose()
                     .context("剪贴板文本不是 UTF-8")?,
             };
-            let source_exe: String = row.get(4)?;
             let item = ClipItem {
                 id: row.get(0)?,
                 kind,
@@ -489,6 +505,20 @@ impl Storage {
             }
         }
         Ok(items)
+    }
+
+    pub fn sources(&self) -> Result<Vec<String>> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT source_exe
+             FROM clips
+             WHERE TRIM(source_exe) <> ''
+             GROUP BY LOWER(source_exe)
+             ORDER BY MAX(last_used_at) DESC, source_exe COLLATE NOCASE ASC",
+        )?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     pub fn payload(&self, id: i64) -> Result<ClipPayload> {
@@ -1011,6 +1041,56 @@ mod tests {
             ClipPayload::Text(text) => assert_eq!(text, "可直接查看的剪贴板文本"),
             ClipPayload::ImagePng(_) => panic!("expected text"),
         }
+        drop(storage);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn history_filters_by_kind_source_and_search_text() {
+        let root = temporary_root("history-filter-test");
+        let config = Arc::new(RwLock::new(AppConfig::default()));
+        let storage = Storage::open(root.clone(), config).unwrap();
+        storage
+            .store(
+                ClipPayload::Text("alpha project note".to_owned()),
+                "notes.exe",
+            )
+            .unwrap();
+        storage
+            .store(ClipPayload::Text("browser query".to_owned()), "msedge.exe")
+            .unwrap();
+        let png = encode_png(&DynamicImage::ImageRgba8(ImageBuffer::from_pixel(
+            4,
+            4,
+            Rgba([30, 60, 90, 255]),
+        )))
+        .unwrap();
+        storage
+            .store(ClipPayload::ImagePng(png), "notes.exe")
+            .unwrap();
+
+        let text_items = storage
+            .list_filtered("", Some(ClipKind::Text), None)
+            .unwrap();
+        assert_eq!(text_items.len(), 2);
+        assert!(text_items.iter().all(|item| item.kind == ClipKind::Text));
+
+        let note_images = storage
+            .list_filtered("", Some(ClipKind::Image), Some("NOTES.EXE"))
+            .unwrap();
+        assert_eq!(note_images.len(), 1);
+        assert_eq!(note_images[0].kind, ClipKind::Image);
+
+        let searched = storage
+            .list_filtered("alpha", Some(ClipKind::Text), Some("notes.exe"))
+            .unwrap();
+        assert_eq!(searched.len(), 1);
+        assert_eq!(searched[0].text.as_deref(), Some("alpha project note"));
+        let sources = storage.sources().unwrap();
+        assert_eq!(sources.len(), 2);
+        assert!(sources.iter().any(|source| source == "notes.exe"));
+        assert!(sources.iter().any(|source| source == "msedge.exe"));
+
         drop(storage);
         fs::remove_dir_all(root).unwrap();
     }

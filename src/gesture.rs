@@ -39,6 +39,16 @@ impl GestureAction {
             Self::OpenHistory => "剪贴板历史",
         }
     }
+
+    pub fn preview_label(self) -> &'static str {
+        match self {
+            Self::ToggleTopmost => "↑ · 置顶窗口",
+            Self::CloseTab => "L · 关闭页面",
+            Self::SearchSelection => "S · 搜索选中内容",
+            Self::CopySelection => "C · 复制内容",
+            Self::OpenHistory => "V · 打开剪贴板历史",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

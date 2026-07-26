@@ -2,16 +2,18 @@ use crate::{
     actions::{post_toast, run_worker},
     clipboard::ClipboardService,
     config::{self, AppConfig, TriggerButton},
+    gesture::{GestureMatch, Point as GesturePoint, Recognizer},
     hook::{
         self, HookCommand, UiPoint, WM_APP_CAPTURE_DONE, WM_APP_OVERLAY_BEGIN, WM_APP_OVERLAY_END,
         WM_APP_OVERLAY_POINT, WM_APP_SHOW_HISTORY, WM_APP_TOAST, WM_APP_TRAY,
     },
     logging,
     resources::{ProcessUsage, UsageSampler},
-    storage::Storage,
+    storage::{ClipKind, ClipPayload, Storage},
     ui::{
         format::{format_bytes, format_uptime},
         history_popup::{self, *},
+        history_preview::PreviewImage,
         history_view::{HistoryView, draw_history_item as draw_history_row},
         settings::{self, Controls, Fonts as SettingsFonts, SettingsPage, *},
         theme::{
@@ -32,6 +34,7 @@ use std::{
         mpsc::{self, Sender},
     },
     thread,
+    time::{Duration, Instant},
 };
 use windows_sys::Win32::{
     Foundation::{
@@ -59,9 +62,13 @@ use windows_sys::Win32::{
     UI::{
         Controls::{
             DRAWITEMSTRUCT, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx,
+            WM_MOUSELEAVE,
         },
         HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext},
-        Input::KeyboardAndMouse::{EnableWindow, SetFocus, VK_DELETE, VK_ESCAPE, VK_RETURN},
+        Input::KeyboardAndMouse::{
+            EnableWindow, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_DELETE,
+            VK_ESCAPE, VK_RETURN,
+        },
         Shell::{
             NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
             Shell_NotifyIconW, ShellExecuteW,
@@ -72,26 +79,28 @@ use windows_sys::Win32::{
             GWLP_USERDATA, GetAncestor, GetClientRect, GetCursorPos, GetForegroundWindow,
             GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW,
             GetWindowTextW, HMENU, HTTRANSPARENT, HWND_TOPMOST, IDC_ARROW, IDI_APPLICATION, IDYES,
-            IsWindowVisible, KillTimer, LB_ADDSTRING, LB_GETCURSEL, LB_RESETCONTENT, LB_SETCURSEL,
-            LBN_DBLCLK, LBN_SELCHANGE, LoadCursorW, LoadIconW, MB_ICONERROR, MB_ICONQUESTION,
-            MB_OK, MB_YESNO, MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG, MessageBoxW,
-            PostQuitMessage, RegisterClassExW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-            SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE,
-            SWP_NOACTIVATE, SWP_SHOWWINDOW, SendMessageW, SetForegroundWindow,
-            SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
-            ShowWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-            TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLIPBOARDUPDATE,
-            WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX,
-            WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONUP,
-            WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_CAPTION,
-            WS_CLIPCHILDREN, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-            WS_EX_TRANSPARENT, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU,
+            IsWindowVisible, KillTimer, LB_ADDSTRING, LB_GETCURSEL, LB_ITEMFROMPOINT,
+            LB_RESETCONTENT, LB_SETCURSEL, LBN_DBLCLK, LBN_SELCHANGE, LoadCursorW, LoadIconW,
+            MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO, MF_CHECKED,
+            MF_SEPARATOR, MF_STRING, MSG, MessageBoxW, PostQuitMessage, RegisterClassExW,
+            SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE,
+            SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SendMessageW,
+            SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW,
+            SetWindowPos, SetWindowTextW, ShowWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
+            TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE,
+            WINDOW_STYLE, WM_CLIPBOARDUPDATE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT,
+            WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND,
+            WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_TIMER,
+            WNDCLASSEXW, WS_CAPTION, WS_CLIPCHILDREN, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+            WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MINIMIZEBOX, WS_OVERLAPPED,
+            WS_POPUP, WS_SYSMENU,
         },
     },
 };
 
 const MAIN_CLASS: &str = "Xmouse.Settings";
 const HISTORY_CLASS: &str = "Xmouse.History";
+const PREVIEW_CLASS: &str = "Xmouse.HistoryPreview";
 const OVERLAY_CLASS: &str = "Xmouse.Overlay";
 const TOAST_CLASS: &str = "Xmouse.Toast";
 const APP_ICON_ID: usize = 1;
@@ -102,7 +111,13 @@ const IDM_HISTORY: usize = 2002;
 const IDM_PAUSE: usize = 2003;
 const IDM_EXIT: usize = 2004;
 const RESOURCE_TIMER_ID: usize = 2;
+const WM_APP_HISTORY_PREVIEW_READY: u32 = 0x8008;
 static APP_STATE: AtomicPtr<AppState> = AtomicPtr::new(ptr::null_mut());
+
+struct PreviewResponse {
+    item_id: i64,
+    image: Option<PreviewImage>,
+}
 
 struct AppState {
     main_hwnd: HWND,
@@ -114,6 +129,11 @@ struct AppState {
     history_copy: HWND,
     history_delete: HWND,
     history_clear: HWND,
+    preview_hwnd: HWND,
+    preview_image: Option<PreviewImage>,
+    preview_sender: Sender<i64>,
+    history_hovered_id: Option<i64>,
+    history_tracking_leave: bool,
     overlay_hwnd: HWND,
     toast_hwnd: HWND,
     config: Arc<RwLock<AppConfig>>,
@@ -123,6 +143,9 @@ struct AppState {
     capture_sender: Sender<()>,
     controls: Controls,
     overlay_points: Vec<UiPoint>,
+    gesture_recognizer: Recognizer,
+    gesture_preview: Option<GestureMatch>,
+    last_gesture_preview_at: Option<Instant>,
     toast_text: String,
     history_items: Vec<HistoryView>,
     history_origin: isize,
@@ -165,6 +188,7 @@ pub fn run() -> Result<()> {
     let storage = Storage::open(root, config.clone())?;
     let clipboard = ClipboardService::new(storage.clone(), config.clone());
     let (capture_sender, capture_receiver) = mpsc::channel();
+    let (preview_sender, preview_receiver) = mpsc::channel();
 
     register_classes()?;
     initialize_common_controls();
@@ -186,6 +210,11 @@ pub fn run() -> Result<()> {
         history_copy: ptr::null_mut(),
         history_delete: ptr::null_mut(),
         history_clear: ptr::null_mut(),
+        preview_hwnd: ptr::null_mut(),
+        preview_image: None,
+        preview_sender,
+        history_hovered_id: None,
+        history_tracking_leave: false,
         overlay_hwnd: ptr::null_mut(),
         toast_hwnd: ptr::null_mut(),
         config,
@@ -195,6 +224,9 @@ pub fn run() -> Result<()> {
         capture_sender,
         controls: Controls::default(),
         overlay_points: Vec::with_capacity(512),
+        gesture_recognizer: Recognizer::new(),
+        gesture_preview: None,
+        last_gesture_preview_at: None,
         toast_text: String::new(),
         history_items: Vec::new(),
         history_origin: 0,
@@ -236,6 +268,16 @@ pub fn run() -> Result<()> {
         620,
         570,
     )?;
+    let preview_hwnd = create_top_window(
+        PREVIEW_CLASS,
+        "",
+        WS_POPUP,
+        WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+        0,
+        0,
+        1,
+        1,
+    )?;
     let overlay_hwnd = create_top_window(
         OVERLAY_CLASS,
         "",
@@ -258,6 +300,7 @@ pub fn run() -> Result<()> {
     )?;
     unsafe {
         (*state_pointer).history_hwnd = history_hwnd;
+        (*state_pointer).preview_hwnd = preview_hwnd;
         (*state_pointer).overlay_hwnd = overlay_hwnd;
         (*state_pointer).toast_hwnd = toast_hwnd;
         SetLayeredWindowAttributes(overlay_hwnd, rgb(0, 0, 0), 255, 1);
@@ -266,6 +309,36 @@ pub fn run() -> Result<()> {
         apply_window_theme(main_hwnd, dark_mode);
         apply_window_theme(history_hwnd, dark_mode);
     }
+
+    let preview_ui_hwnd = main_hwnd as isize;
+    thread::Builder::new()
+        .name("xmouse-preview".to_owned())
+        .spawn(move || {
+            while let Ok(mut item_id) = preview_receiver.recv() {
+                while let Ok(newer_id) = preview_receiver.try_recv() {
+                    item_id = newer_id;
+                }
+                let image = match storage.payload(item_id) {
+                    Ok(ClipPayload::ImagePng(png)) => PreviewImage::from_png(item_id, &png),
+                    _ => None,
+                };
+                let response = Box::new(PreviewResponse { item_id, image });
+                let pointer = Box::into_raw(response);
+                if unsafe {
+                    windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(
+                        preview_ui_hwnd as HWND,
+                        WM_APP_HISTORY_PREVIEW_READY,
+                        0,
+                        pointer as LPARAM,
+                    )
+                } == 0
+                {
+                    unsafe {
+                        drop(Box::from_raw(pointer));
+                    }
+                }
+            }
+        })?;
     hook::update_ui_hwnd(main_hwnd as isize);
 
     let (command_sender, command_receiver) = mpsc::channel::<HookCommand>();
@@ -395,6 +468,11 @@ fn register_classes() -> Result<()> {
             HISTORY_CLASS,
             Some(history_proc as unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT),
             (COLOR_WINDOW + 1) as HBRUSH,
+        ),
+        (
+            PREVIEW_CLASS,
+            Some(preview_proc as unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT),
+            ptr::null_mut(),
         ),
         (
             OVERLAY_CLASS,
@@ -536,29 +614,50 @@ fn pretranslate_history(message: &MSG) -> bool {
     let Some(state) = state_mut() else {
         return false;
     };
-    if state.history_hwnd.is_null()
-        || unsafe { IsWindowVisible(state.history_hwnd) } == 0
-        || message.message != WM_KEYDOWN
-    {
+    if state.history_hwnd.is_null() || unsafe { IsWindowVisible(state.history_hwnd) } == 0 {
         return false;
     }
     let root = unsafe { GetAncestor(message.hwnd, GA_ROOT) };
     if root != state.history_hwnd {
         return false;
     }
-    match message.wParam as u16 {
-        VK_RETURN => {
-            copy_selected_history(state);
-            true
+    match message.message {
+        WM_MOUSEMOVE if message.hwnd == state.history_list => {
+            if !state.history_tracking_leave {
+                let mut tracking = TRACKMOUSEEVENT {
+                    cbSize: mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: state.history_list,
+                    dwHoverTime: 0,
+                };
+                unsafe {
+                    TrackMouseEvent(&mut tracking);
+                }
+                state.history_tracking_leave = true;
+            }
+            update_history_hover(state, message.lParam);
+            false
         }
-        VK_DELETE => {
-            delete_selected_history(state);
-            true
+        WM_MOUSELEAVE if message.hwnd == state.history_list => {
+            state.history_tracking_leave = false;
+            clear_history_hover(state);
+            false
         }
-        VK_ESCAPE => {
-            hide_history(state);
-            true
-        }
+        WM_KEYDOWN => match message.wParam as u16 {
+            VK_RETURN => {
+                copy_selected_history(state);
+                true
+            }
+            VK_DELETE => {
+                delete_selected_history(state);
+                true
+            }
+            VK_ESCAPE => {
+                hide_history(state);
+                true
+            }
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -679,6 +778,19 @@ unsafe extern "system" fn main_proc(
             }
             0
         }
+        WM_APP_HISTORY_PREVIEW_READY => {
+            let pointer = lparam as *mut PreviewResponse;
+            if !pointer.is_null() {
+                let response = unsafe { *Box::from_raw(pointer) };
+                if let Some(state) = state_mut()
+                    && state.history_hovered_id == Some(response.item_id)
+                {
+                    state.preview_image = response.image;
+                    show_history_preview(state);
+                }
+            }
+            0
+        }
         WM_APP_OVERLAY_BEGIN | WM_APP_OVERLAY_POINT => {
             if let Some(state) = state_mut() {
                 let pointer = lparam as *mut UiPoint;
@@ -686,9 +798,12 @@ unsafe extern "system" fn main_proc(
                     let point = unsafe { *Box::from_raw(pointer) };
                     if message == WM_APP_OVERLAY_BEGIN {
                         state.overlay_points.clear();
+                        state.gesture_preview = None;
+                        state.last_gesture_preview_at = None;
                         show_overlay(state);
                     }
                     state.overlay_points.push(point);
+                    refresh_gesture_preview(state);
                     unsafe {
                         InvalidateRect(state.overlay_hwnd, ptr::null(), 0);
                     }
@@ -702,6 +817,8 @@ unsafe extern "system" fn main_proc(
                     ShowWindow(state.overlay_hwnd, SW_HIDE);
                 }
                 state.overlay_points.clear();
+                state.gesture_preview = None;
+                state.last_gesture_preview_at = None;
             }
             0
         }
@@ -894,6 +1011,76 @@ unsafe extern "system" fn history_proc(
     }
 }
 
+fn paint_gesture_prediction(hdc: *mut c_void, state: &AppState) {
+    let Some(anchor) = state.overlay_points.last() else {
+        return;
+    };
+    let monitor = unsafe {
+        MonitorFromPoint(
+            POINT {
+                x: anchor.x,
+                y: anchor.y,
+            },
+            MONITOR_DEFAULTTONEAREST,
+        )
+    };
+    let mut monitor_info = MONITORINFO {
+        cbSize: mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    unsafe {
+        GetMonitorInfoW(monitor, &mut monitor_info);
+    }
+    let virtual_x = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+    let virtual_y = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+    let width = 340;
+    let height = 48;
+    let left = (monitor_info.rcWork.left + monitor_info.rcWork.right - width) / 2 - virtual_x;
+    let top = monitor_info.rcWork.bottom - height - 24 - virtual_y;
+    let right = left + width;
+    let bottom = top + height;
+    let border = if state.gesture_preview.is_some() {
+        ACCENT_COLOR
+    } else {
+        rgb(85, 96, 112)
+    };
+    let brush = unsafe { CreateSolidBrush(rgb(24, 29, 39)) };
+    let pen = unsafe { CreatePen(PS_SOLID, 1, border) };
+    let previous_brush = unsafe { SelectObject(hdc, brush) };
+    let previous_pen = unsafe { SelectObject(hdc, pen) };
+    unsafe {
+        RoundRect(hdc, left, top, right, bottom, 18, 18);
+        SelectObject(hdc, previous_brush);
+        SelectObject(hdc, previous_pen);
+        DeleteObject(brush);
+        DeleteObject(pen);
+        SetBkMode(hdc, TRANSPARENT as i32);
+        SetTextColor(hdc, rgb(245, 247, 250));
+    }
+    let label = state
+        .gesture_preview
+        .map(|matched| format!("预计：{}", matched.action.preview_label()))
+        .unwrap_or_else(|| "正在识别手势…".to_owned());
+    let label = wide(&label);
+    let mut text_rect = RECT {
+        left: left + 14,
+        top,
+        right: right - 14,
+        bottom,
+    };
+    let previous_font = unsafe { SelectObject(hdc, state.font_body) };
+    unsafe {
+        DrawTextW(
+            hdc,
+            label.as_ptr(),
+            -1,
+            &mut text_rect,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+        SelectObject(hdc, previous_font);
+    }
+}
+
 unsafe extern "system" fn overlay_proc(
     hwnd: HWND,
     message: u32,
@@ -915,31 +1102,62 @@ unsafe extern "system" fn overlay_proc(
                 FillRect(hdc, &rect, background);
                 DeleteObject(background);
             }
-            if let Some(state) = state_mut()
-                && state.overlay_points.len() >= 2
-            {
-                let pen = unsafe { CreatePen(PS_SOLID, 4, rgb(25, 145, 255)) };
-                let old = unsafe { SelectObject(hdc, pen) };
-                let virtual_x = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
-                let virtual_y = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
-                let first = &state.overlay_points[0];
-                unsafe {
-                    MoveToEx(
-                        hdc,
-                        first.x - virtual_x,
-                        first.y - virtual_y,
-                        ptr::null_mut(),
-                    );
-                }
-                for point in state.overlay_points.iter().skip(1) {
+            if let Some(state) = state_mut() {
+                if state.overlay_points.len() >= 2 {
+                    let pen = unsafe { CreatePen(PS_SOLID, 4, rgb(25, 145, 255)) };
+                    let old = unsafe { SelectObject(hdc, pen) };
+                    let virtual_x = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+                    let virtual_y = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+                    let first = &state.overlay_points[0];
                     unsafe {
-                        LineTo(hdc, point.x - virtual_x, point.y - virtual_y);
+                        MoveToEx(
+                            hdc,
+                            first.x - virtual_x,
+                            first.y - virtual_y,
+                            ptr::null_mut(),
+                        );
+                    }
+                    for point in state.overlay_points.iter().skip(1) {
+                        unsafe {
+                            LineTo(hdc, point.x - virtual_x, point.y - virtual_y);
+                        }
+                    }
+                    unsafe {
+                        SelectObject(hdc, old);
+                        DeleteObject(pen);
                     }
                 }
-                unsafe {
-                    SelectObject(hdc, old);
-                    DeleteObject(pen);
-                }
+                paint_gesture_prediction(hdc, state);
+            }
+            unsafe {
+                EndPaint(hwnd, &paint);
+            }
+            0
+        }
+        _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
+    }
+}
+
+unsafe extern "system" fn preview_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match message {
+        WM_NCHITTEST => HTTRANSPARENT as LRESULT,
+        WM_ERASEBKGND => 1,
+        WM_PAINT => {
+            let mut paint = PAINTSTRUCT::default();
+            let hdc = unsafe { BeginPaint(hwnd, &mut paint) };
+            let mut client = RECT::default();
+            unsafe {
+                GetClientRect(hwnd, &mut client);
+            }
+            if let Some(state) = state_mut()
+                && let Some(preview) = state.preview_image.as_ref()
+            {
+                preview.draw(hdc, client, palette(state.dark_mode));
             }
             unsafe {
                 EndPaint(hwnd, &paint);
@@ -1176,6 +1394,7 @@ fn refresh_theme_resources(state: &mut AppState) {
     unsafe {
         InvalidateRect(state.main_hwnd, ptr::null(), 1);
         InvalidateRect(state.history_hwnd, ptr::null(), 1);
+        InvalidateRect(state.preview_hwnd, ptr::null(), 1);
     }
     for control in state
         .controls
@@ -1191,6 +1410,7 @@ fn refresh_theme_resources(state: &mut AppState) {
             state.controls.nav_general,
             state.controls.nav_history,
             state.controls.nav_resources,
+            state.controls.save,
             state.history_search,
             state.history_list,
             state.history_usage,
@@ -1237,6 +1457,7 @@ fn read_config_from_controls(state: &AppState) -> Result<AppConfig> {
 
 fn show_history(state: &mut AppState, origin: isize) {
     state.history_origin = origin;
+    clear_history_hover(state);
     set_control_text(state.history_search, "");
     rebuild_history(state, "");
     let mut cursor = POINT::default();
@@ -1278,6 +1499,7 @@ fn show_history(state: &mut AppState, origin: isize) {
 }
 
 fn hide_history(state: &mut AppState) {
+    clear_history_hover(state);
     unsafe {
         ShowWindow(state.history_hwnd, SW_HIDE);
     }
@@ -1294,6 +1516,7 @@ fn rebuild_history(state: &mut AppState, query: &str) {
 }
 
 fn rebuild_history_with_selection(state: &mut AppState, query: &str, selected_id: Option<i64>) {
+    clear_history_hover(state);
     match state.storage.list(query) {
         Ok(items) => {
             state.history_items = items.into_iter().map(HistoryView::new).collect();
@@ -1326,6 +1549,91 @@ fn rebuild_history_with_selection(state: &mut AppState, query: &str, selected_id
             state.main_hwnd as isize,
             &format!("读取历史失败：{error:#}"),
         ),
+    }
+}
+
+fn update_history_hover(state: &mut AppState, position: LPARAM) {
+    let result =
+        unsafe { SendMessageW(state.history_list, LB_ITEMFROMPOINT, 0, position) } as usize;
+    let hovered_id = if hiword(result) == 0 {
+        state
+            .history_items
+            .get(loword(result) as usize)
+            .filter(|view| view.item.kind == ClipKind::Image)
+            .map(|view| view.item.id)
+    } else {
+        None
+    };
+    if hovered_id == state.history_hovered_id {
+        return;
+    }
+    state.history_hovered_id = hovered_id;
+    state.preview_image = None;
+    unsafe {
+        ShowWindow(state.preview_hwnd, SW_HIDE);
+    }
+    if let Some(item_id) = hovered_id {
+        let _ = state.preview_sender.send(item_id);
+    }
+}
+
+fn clear_history_hover(state: &mut AppState) {
+    state.history_hovered_id = None;
+    state.preview_image = None;
+    state.history_tracking_leave = false;
+    unsafe {
+        ShowWindow(state.preview_hwnd, SW_HIDE);
+    }
+}
+
+fn show_history_preview(state: &mut AppState) {
+    let Some(preview) = state.preview_image.as_ref() else {
+        unsafe {
+            ShowWindow(state.preview_hwnd, SW_HIDE);
+        }
+        return;
+    };
+    if state.history_hovered_id != Some(preview.item_id) {
+        return;
+    }
+    let (width, height) = preview.window_size();
+    let mut history_rect = RECT::default();
+    let mut cursor = POINT::default();
+    unsafe {
+        GetWindowRect(state.history_hwnd, &mut history_rect);
+        GetCursorPos(&mut cursor);
+    }
+    let monitor = unsafe { MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST) };
+    let mut monitor_info = MONITORINFO {
+        cbSize: mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    unsafe {
+        GetMonitorInfoW(monitor, &mut monitor_info);
+    }
+    let right_x = history_rect.right + 12;
+    let x = if right_x + width <= monitor_info.rcWork.right {
+        right_x
+    } else {
+        (history_rect.left - width - 12).max(monitor_info.rcWork.left)
+    };
+    let y = (cursor.y - height / 2)
+        .max(monitor_info.rcWork.top)
+        .min(monitor_info.rcWork.bottom - height);
+    let region = unsafe { CreateRoundRectRgn(0, 0, width + 1, height + 1, 18, 18) };
+    unsafe {
+        SetWindowRgn(state.preview_hwnd, region, 0);
+        SetWindowPos(
+            state.preview_hwnd,
+            HWND_TOPMOST,
+            x,
+            y,
+            width,
+            height,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+        InvalidateRect(state.preview_hwnd, ptr::null(), 1);
+        ShowWindow(state.preview_hwnd, SW_SHOWNOACTIVATE);
     }
 }
 
@@ -1409,19 +1717,30 @@ fn delete_selected_history(state: &mut AppState) {
     };
     let item = &state.history_items[index].item;
     if item.pinned {
-        let text = wide("这条记录已置顶，仍要删除吗？");
+        let text = wide("置顶记录受保护，请先取消置顶再删除。");
         let title = wide("Xmouse");
-        if unsafe {
+        unsafe {
             MessageBoxW(
-                state.history_hwnd,
+                history_dialog_owner(state),
                 text.as_ptr(),
                 title.as_ptr(),
-                MB_YESNO | MB_ICONQUESTION,
-            )
-        } != IDYES
-        {
-            return;
+                MB_OK | MB_ICONINFORMATION,
+            );
         }
+        return;
+    }
+    let text = wide("确定删除这条剪贴板记录吗？");
+    let title = wide("Xmouse");
+    if unsafe {
+        MessageBoxW(
+            history_dialog_owner(state),
+            text.as_ptr(),
+            title.as_ptr(),
+            MB_YESNO | MB_ICONQUESTION,
+        )
+    } != IDYES
+    {
+        return;
     }
     let id = item.id;
     match state.storage.remove(id) {
@@ -1437,19 +1756,31 @@ fn delete_selected_history(state: &mut AppState) {
 }
 
 fn confirm_clear_history(state: &mut AppState) {
-    let includes_pinned = state
+    let pinned_count = state
         .storage
         .stats()
-        .is_ok_and(|stats| stats.pinned_count > 0);
-    let text = wide(if includes_pinned {
-        "确定删除全部剪贴板历史吗？这也会删除置顶记录。"
-    } else {
-        "确定删除全部剪贴板历史吗？"
-    });
+        .map(|stats| stats.pinned_count)
+        .unwrap_or(0);
+    if pinned_count > 0 {
+        let text = wide(&format!(
+            "历史中有 {pinned_count} 条置顶记录，请先取消置顶再清空。"
+        ));
+        let title = wide("Xmouse");
+        unsafe {
+            MessageBoxW(
+                history_dialog_owner(state),
+                text.as_ptr(),
+                title.as_ptr(),
+                MB_OK | MB_ICONINFORMATION,
+            );
+        }
+        return;
+    }
+    let text = wide("确定删除全部剪贴板历史吗？此操作无法撤销。");
     let title = wide("Xmouse");
     let answer = unsafe {
         MessageBoxW(
-            state.main_hwnd,
+            history_dialog_owner(state),
             text.as_ptr(),
             title.as_ptr(),
             MB_YESNO | MB_ICONQUESTION,
@@ -1468,6 +1799,14 @@ fn confirm_clear_history(state: &mut AppState) {
             }
             Err(error) => post_toast(state.main_hwnd as isize, &format!("清空失败：{error:#}")),
         }
+    }
+}
+
+fn history_dialog_owner(state: &AppState) -> HWND {
+    if unsafe { IsWindowVisible(state.history_hwnd) } != 0 {
+        state.history_hwnd
+    } else {
+        state.main_hwnd
     }
 }
 
@@ -1573,37 +1912,15 @@ fn paint_main_window(hwnd: HWND) {
         widgets::rounded_panel(hdc, left, top, right, bottom, radius, colors);
     }
 
-    let logo_brush = unsafe { CreateSolidBrush(ACCENT_COLOR) };
-    let logo_pen = unsafe { CreatePen(PS_SOLID, 1, ACCENT_COLOR) };
-    let old_brush = unsafe { SelectObject(hdc, logo_brush) };
-    let old_pen = unsafe { SelectObject(hdc, logo_pen) };
-    unsafe {
-        RoundRect(hdc, 22, 24, 58, 60, 12, 12);
-        SelectObject(hdc, old_brush);
-        SelectObject(hdc, old_pen);
-        DeleteObject(logo_brush);
-        DeleteObject(logo_pen);
-        SetBkMode(hdc, TRANSPARENT as i32);
-        SetTextColor(hdc, rgb(255, 255, 255));
-    }
-    let old_font = unsafe { SelectObject(hdc, state.font_section) };
-    let mut logo_rect = RECT {
-        left: 22,
-        top: 24,
-        right: 58,
-        bottom: 60,
-    };
-    let logo = wide("X");
-    unsafe {
-        DrawTextW(
-            hdc,
-            logo.as_ptr(),
-            -1,
-            &mut logo_rect,
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-        );
-        SelectObject(hdc, old_font);
-    }
+    settings::draw_sidebar_identity(
+        hdc,
+        colors,
+        SettingsFonts {
+            body: state.font_body,
+            section: state.font_section,
+            title: state.font_title,
+        },
+    );
     unsafe {
         EndPaint(hwnd, &paint);
     }
@@ -1712,6 +2029,43 @@ fn draw_history_item(draw: &DRAWITEMSTRUCT) {
         return;
     };
     draw_history_row(draw, view, palette(state.dark_mode), state.font_body);
+}
+
+fn refresh_gesture_preview(state: &mut AppState) {
+    if state.overlay_points.len() < 6 {
+        return;
+    }
+    let now = Instant::now();
+    if state
+        .last_gesture_preview_at
+        .is_some_and(|previous| now.duration_since(previous) < Duration::from_millis(70))
+    {
+        return;
+    }
+    let path_length: f32 = state
+        .overlay_points
+        .windows(2)
+        .map(|pair| {
+            let dx = (pair[1].x - pair[0].x) as f32;
+            let dy = (pair[1].y - pair[0].y) as f32;
+            (dx * dx + dy * dy).sqrt()
+        })
+        .sum();
+    if path_length < 24.0 {
+        return;
+    }
+    let points: Vec<GesturePoint> = state
+        .overlay_points
+        .iter()
+        .map(|point| GesturePoint::new(point.x as f32, point.y as f32))
+        .collect();
+    let threshold = state
+        .config
+        .read()
+        .expect("config poisoned")
+        .recognition_threshold;
+    state.gesture_preview = state.gesture_recognizer.recognize(&points, threshold);
+    state.last_gesture_preview_at = Some(now);
 }
 
 fn show_overlay(state: &mut AppState) {

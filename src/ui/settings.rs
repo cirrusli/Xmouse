@@ -1,8 +1,14 @@
-use super::native::{ControlFactory, set_control_font};
-use std::ptr;
+use super::{
+    native::{ControlFactory, set_control_font},
+    theme::{ACCENT_COLOR, Palette, rgb},
+};
+use std::{ffi::c_void, ptr};
 use windows_sys::Win32::{
-    Foundation::HWND,
-    Graphics::Gdi::HFONT,
+    Foundation::{HWND, RECT},
+    Graphics::Gdi::{
+        CreatePen, CreateSolidBrush, DT_CENTER, DT_LEFT, DT_SINGLELINE, DT_VCENTER, DeleteObject,
+        DrawTextW, HFONT, PS_SOLID, RoundRect, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    },
     UI::WindowsAndMessaging::{BS_OWNERDRAW, WS_CHILD, WS_TABSTOP, WS_VISIBLE},
 };
 
@@ -40,6 +46,7 @@ pub struct Fonts {
 }
 
 pub struct Controls {
+    pub save: HWND,
     pub status: HWND,
     pub page_title: HWND,
     pub page_subtitle: HWND,
@@ -68,6 +75,7 @@ pub struct Controls {
 impl Default for Controls {
     fn default() -> Self {
         Self {
+            save: ptr::null_mut(),
             status: ptr::null_mut(),
             page_title: ptr::null_mut(),
             page_subtitle: ptr::null_mut(),
@@ -97,9 +105,6 @@ impl Default for Controls {
 pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
     let mut controls = Controls::default();
     let builder = ControlFactory::new(hwnd, fonts.body);
-    let brand = builder.label("Xmouse", 72, 24, 112, 30);
-    set_control_font(brand, fonts.section);
-    builder.label("轻量效率工具", 72, 54, 112, 22);
 
     controls.nav_general = builder.control(
         "BUTTON",
@@ -134,9 +139,6 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
         42,
         IDC_NAV_RESOURCES,
     );
-    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
-    builder.label(&version, 22, 636, 120, 22);
-
     controls.page_title = builder.label("常规", 220, 24, 300, 34);
     set_control_font(controls.page_title, fonts.title);
     controls.page_subtitle = builder.label("手势与启动", 221, 58, 440, 22);
@@ -362,7 +364,7 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
     controls.resource_details = builder.label("", 232, 490, 580, 56);
     resources_page.push(controls.resource_details);
 
-    builder.control(
+    controls.save = builder.control(
         "BUTTON",
         "保存设置",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
@@ -378,4 +380,95 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
     controls.history_page = history_page;
     controls.resources_page = resources_page;
     controls
+}
+
+pub fn draw_sidebar_identity(hdc: *mut c_void, colors: Palette, fonts: Fonts) {
+    let logo_brush = unsafe { CreateSolidBrush(ACCENT_COLOR) };
+    let logo_pen = unsafe { CreatePen(PS_SOLID, 1, ACCENT_COLOR) };
+    let old_brush = unsafe { SelectObject(hdc, logo_brush) };
+    let old_pen = unsafe { SelectObject(hdc, logo_pen) };
+    unsafe {
+        RoundRect(hdc, 22, 24, 58, 60, 12, 12);
+        SelectObject(hdc, old_brush);
+        SelectObject(hdc, old_pen);
+        DeleteObject(logo_brush);
+        DeleteObject(logo_pen);
+        SetBkMode(hdc, TRANSPARENT as i32);
+        SetTextColor(hdc, rgb(255, 255, 255));
+    }
+    let logo_font = unsafe { SelectObject(hdc, fonts.section) };
+    let logo = wide("X");
+    let mut logo_rect = RECT {
+        left: 22,
+        top: 24,
+        right: 58,
+        bottom: 60,
+    };
+    unsafe {
+        DrawTextW(
+            hdc,
+            logo.as_ptr(),
+            -1,
+            &mut logo_rect,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        );
+        SelectObject(hdc, logo_font);
+        SetTextColor(hdc, colors.text);
+    }
+
+    let brand_font = unsafe { SelectObject(hdc, fonts.section) };
+    let brand = wide("Xmouse");
+    let mut brand_rect = RECT {
+        left: 72,
+        top: 22,
+        right: 184,
+        bottom: 50,
+    };
+    unsafe {
+        DrawTextW(
+            hdc,
+            brand.as_ptr(),
+            -1,
+            &mut brand_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        SelectObject(hdc, brand_font);
+    }
+
+    let subtitle = wide("轻量效率工具");
+    let version = wide(&format!("v{}", env!("CARGO_PKG_VERSION")));
+    let mut subtitle_rect = RECT {
+        left: 72,
+        top: 50,
+        right: 184,
+        bottom: 76,
+    };
+    let mut version_rect = RECT {
+        left: 22,
+        top: 632,
+        right: 150,
+        bottom: 662,
+    };
+    let body_font = unsafe { SelectObject(hdc, fonts.body) };
+    unsafe {
+        DrawTextW(
+            hdc,
+            subtitle.as_ptr(),
+            -1,
+            &mut subtitle_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        DrawTextW(
+            hdc,
+            version.as_ptr(),
+            -1,
+            &mut version_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        SelectObject(hdc, body_font);
+    }
+}
+
+fn wide(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(Some(0)).collect()
 }

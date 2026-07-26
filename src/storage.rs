@@ -562,12 +562,19 @@ impl Storage {
 
     pub fn remove(&self, id: i64) -> Result<()> {
         let connection = self.connect()?;
-        let media: Option<String> = connection
-            .query_row("SELECT media_name FROM clips WHERE id = ?1", [id], |row| {
-                row.get(0)
-            })
-            .optional()?
-            .flatten();
+        let record: Option<(Option<String>, bool)> = connection
+            .query_row(
+                "SELECT media_name, pinned FROM clips WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0)),
+            )
+            .optional()?;
+        let Some((media, pinned)) = record else {
+            bail!("找不到历史记录 {id}");
+        };
+        if pinned {
+            bail!("置顶记录受保护，请先取消置顶再删除");
+        }
         connection.execute("DELETE FROM clips WHERE id = ?1", [id])?;
         if let Some(name) = media {
             let _ = fs::remove_file(self.media_dir.join(name));
@@ -577,6 +584,13 @@ impl Storage {
 
     pub fn clear(&self) -> Result<()> {
         let connection = self.connect()?;
+        let pinned_count: i64 =
+            connection.query_row("SELECT COUNT(*) FROM clips WHERE pinned != 0", [], |row| {
+                row.get(0)
+            })?;
+        if pinned_count > 0 {
+            bail!("存在 {pinned_count} 条置顶记录，请先取消置顶再清空");
+        }
         let mut statement =
             connection.prepare("SELECT media_name FROM clips WHERE media_name IS NOT NULL")?;
         let names: Vec<String> = statement
@@ -1170,6 +1184,38 @@ mod tests {
             .unwrap();
         assert_eq!(schema_version, 99);
         drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pinned_items_require_unpin_before_delete_or_clear() {
+        let root = temporary_root("pin-delete-protection-test");
+        let config = Arc::new(RwLock::new(AppConfig::default()));
+        let storage = Storage::open(root.clone(), config).unwrap();
+        storage
+            .store(ClipPayload::Text("受保护".to_owned()), "pin.exe")
+            .unwrap();
+        storage
+            .store(ClipPayload::Text("普通记录".to_owned()), "plain.exe")
+            .unwrap();
+        let pinned_id = storage
+            .list("")
+            .unwrap()
+            .into_iter()
+            .find(|item| item.text.as_deref() == Some("受保护"))
+            .unwrap()
+            .id;
+        storage.set_pinned(pinned_id, true).unwrap();
+
+        assert!(storage.remove(pinned_id).is_err());
+        assert!(storage.clear().is_err());
+        assert_eq!(storage.stats().unwrap().item_count, 2);
+
+        storage.set_pinned(pinned_id, false).unwrap();
+        storage.remove(pinned_id).unwrap();
+        storage.clear().unwrap();
+        assert_eq!(storage.stats().unwrap().item_count, 0);
+        drop(storage);
         fs::remove_dir_all(root).unwrap();
     }
 }

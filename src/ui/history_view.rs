@@ -181,9 +181,25 @@ fn decode_thumbnail(png: &[u8]) -> Option<Thumbnail> {
         .thumbnail(48, 48)
         .to_rgba8();
     let (width, height) = image.dimensions();
-    let mut bgra = image.into_raw();
-    for pixel in bgra.chunks_exact_mut(4) {
-        pixel.swap(0, 2);
+    let mut bgra = Vec::with_capacity((width * height * 4) as usize);
+    for (index, pixel) in image.pixels().enumerate() {
+        let x = index as u32 % width;
+        let y = index as u32 / width;
+        let checker = if (x / 6 + y / 6).is_multiple_of(2) {
+            238u8
+        } else {
+            216u8
+        };
+        let alpha = pixel[3] as u16;
+        let composite = |channel: u8| -> u8 {
+            ((channel as u16 * alpha + checker as u16 * (255 - alpha)) / 255) as u8
+        };
+        bgra.extend_from_slice(&[
+            composite(pixel[2]),
+            composite(pixel[1]),
+            composite(pixel[0]),
+            255,
+        ]);
     }
     Some(Thumbnail {
         width: width as i32,

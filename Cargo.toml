@@ -1,6 +1,6 @@
 [package]
 name = "xmouse"
-version = "0.13.0"
+version = "0.13.1"
 edition = "2024"
 description = "Lightweight native Windows mouse gestures and clipboard history"
 license = "MIT"

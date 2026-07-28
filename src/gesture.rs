@@ -3,6 +3,14 @@ use std::f32::consts::PI;
 
 const SAMPLE_COUNT: usize = 64;
 const MIN_MARGIN: f32 = 0.06;
+// Keep the circle gate below the built-in C templates while allowing roughly
+// one sixth of a turn of natural overlap at the end of a hand-drawn circle.
+// The endpoint gap is normalized per axis so stretched circles and display
+// scaling do not change whether a path counts as closed.
+const CIRCLE_CLOSURE_RATIO: f32 = 0.55;
+const CIRCLE_INTERSECTION_GAP_RATIO: f32 = 0.80;
+const CIRCLE_SCORE_RELAXATION: f32 = 0.04;
+const CIRCLE_INTERSECTION_BONUS: f32 = 0.05;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct Point {
@@ -167,8 +175,9 @@ impl Recognizer {
     }
 
     pub fn recognize(&self, points: &[Point], threshold: f32) -> Option<GestureMatch> {
-        let candidate = normalize(points)?;
-        let candidate_closed = is_closed_path(points);
+        let normalized = normalized_points(points)?;
+        let candidate = direction_vector(&normalized)?;
+        let circle_evidence = circle_evidence(&normalized);
         let mut by_gesture: Vec<(GestureId, f32)> = Vec::new();
 
         for template in self
@@ -176,10 +185,19 @@ impl Recognizer {
             .iter()
             .chain(self.user_templates.iter())
         {
-            if template.closed != candidate_closed {
+            if circle_evidence.strongly_closed && !template.closed {
                 continue;
             }
-            let score = cosine_similarity(&candidate, &template.vector);
+            if template.closed
+                && !circle_evidence.strongly_closed
+                && !circle_evidence.intersecting_near_closed
+            {
+                continue;
+            }
+            let mut score = cosine_similarity(&candidate, &template.vector);
+            if template.closed && circle_evidence.intersecting_near_closed {
+                score = (score + CIRCLE_INTERSECTION_BONUS).min(1.0);
+            }
             if let Some((_, best)) = by_gesture
                 .iter_mut()
                 .find(|(gesture, _)| *gesture == template.gesture)
@@ -194,23 +212,99 @@ impl Recognizer {
         let (gesture, score) = *by_gesture.first()?;
         let second = by_gesture.get(1).map(|(_, score)| *score).unwrap_or(-1.0);
         let margin = score - second;
-        (score >= threshold && margin >= MIN_MARGIN).then_some(GestureMatch { gesture, score })
+        let required_score = if gesture == GestureId::Circle {
+            (threshold - CIRCLE_SCORE_RELAXATION).max(0.60)
+        } else {
+            threshold
+        };
+        (score >= required_score && margin >= MIN_MARGIN).then_some(GestureMatch { gesture, score })
     }
 }
 
-fn is_closed_path(points: &[Point]) -> bool {
-    let Some(first) = points.first().copied() else {
-        return false;
-    };
-    let Some(last) = points.last().copied() else {
-        return false;
-    };
+#[derive(Debug, Clone, Copy)]
+struct CircleEvidence {
+    strongly_closed: bool,
+    intersecting_near_closed: bool,
+}
+
+fn circle_evidence(points: &[Point]) -> CircleEvidence {
+    let gap_ratio = endpoint_gap_ratio(points);
+    let strongly_closed = gap_ratio.is_some_and(|ratio| ratio <= CIRCLE_CLOSURE_RATIO);
+    let intersecting_near_closed = gap_ratio
+        .is_some_and(|ratio| ratio <= CIRCLE_INTERSECTION_GAP_RATIO)
+        && has_self_intersection(points);
+    CircleEvidence {
+        strongly_closed,
+        intersecting_near_closed,
+    }
+}
+
+fn endpoint_gap_ratio(points: &[Point]) -> Option<f32> {
+    let first = points.first().copied()?;
+    let last = points.last().copied()?;
     let min_x = points.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
     let max_x = points.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max);
     let min_y = points.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
     let max_y = points.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max);
-    let span = (max_x - min_x).max(max_y - min_y);
-    span.is_finite() && span > f32::EPSILON && first.distance(last) / span <= 0.40
+    let span_x = max_x - min_x;
+    let span_y = max_y - min_y;
+    if !span_x.is_finite()
+        || !span_y.is_finite()
+        || span_x <= f32::EPSILON
+        || span_y <= f32::EPSILON
+    {
+        return None;
+    }
+    let gap_x = (last.x - first.x) / span_x;
+    let gap_y = (last.y - first.y) / span_y;
+    Some((gap_x * gap_x + gap_y * gap_y).sqrt())
+}
+
+fn has_self_intersection(points: &[Point]) -> bool {
+    if points.len() < 4 {
+        return false;
+    }
+    for first_index in 0..points.len() - 1 {
+        for second_index in first_index + 2..points.len() - 1 {
+            if segments_intersect(
+                points[first_index],
+                points[first_index + 1],
+                points[second_index],
+                points[second_index + 1],
+            ) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn segments_intersect(a: Point, b: Point, c: Point, d: Point) -> bool {
+    const EPSILON: f32 = 1.0e-5;
+    let ab_c = cross(a, b, c);
+    let ab_d = cross(a, b, d);
+    let cd_a = cross(c, d, a);
+    let cd_b = cross(c, d, b);
+    if ((ab_c > EPSILON && ab_d < -EPSILON) || (ab_c < -EPSILON && ab_d > EPSILON))
+        && ((cd_a > EPSILON && cd_b < -EPSILON) || (cd_a < -EPSILON && cd_b > EPSILON))
+    {
+        return true;
+    }
+    (ab_c.abs() <= EPSILON && point_on_segment(a, b, c, EPSILON))
+        || (ab_d.abs() <= EPSILON && point_on_segment(a, b, d, EPSILON))
+        || (cd_a.abs() <= EPSILON && point_on_segment(c, d, a, EPSILON))
+        || (cd_b.abs() <= EPSILON && point_on_segment(c, d, b, EPSILON))
+}
+
+fn cross(a: Point, b: Point, c: Point) -> f32 {
+    (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+}
+
+fn point_on_segment(a: Point, b: Point, point: Point, epsilon: f32) -> bool {
+    point.x >= a.x.min(b.x) - epsilon
+        && point.x <= a.x.max(b.x) + epsilon
+        && point.y >= a.y.min(b.y) - epsilon
+        && point.y <= a.y.max(b.y) + epsilon
 }
 
 fn path_length(points: &[Point]) -> f32 {
@@ -288,6 +382,10 @@ fn normalized_points(points: &[Point]) -> Option<Vec<Point>> {
 fn normalize(points: &[Point]) -> Option<Vec<f32>> {
     let normalized = normalized_points(points)?;
 
+    direction_vector(&normalized)
+}
+
+fn direction_vector(normalized: &[Point]) -> Option<Vec<f32>> {
     let mut vector = Vec::with_capacity((SAMPLE_COUNT - 1) * 2);
     for pair in normalized.windows(2) {
         let dx = pair[1].x - pair[0].x;
@@ -454,12 +552,19 @@ mod tests {
     fn recognizes_all_templates_with_scale_and_jitter() {
         let recognizer = Recognizer::new();
         for (gesture, variants) in template_points() {
-            let candidate = jitter(&variants[0], 0.4);
-            let matched = recognizer
-                .recognize(&candidate, 0.80)
-                .unwrap_or_else(|| panic!("failed to recognize {}", gesture.label()));
-            assert_eq!(matched.gesture, gesture);
-            assert!(matched.score >= 0.80);
+            for (index, variant) in variants.iter().enumerate() {
+                let candidate = jitter(variant, 0.4);
+                let matched = recognizer.recognize(&candidate, 0.82).unwrap_or_else(|| {
+                    panic!("failed to recognize {} template {index}", gesture.label())
+                });
+                assert_eq!(matched.gesture, gesture);
+                let minimum_score = if gesture == GestureId::Circle {
+                    0.78
+                } else {
+                    0.82
+                };
+                assert!(matched.score >= minimum_score);
+            }
         }
     }
 
@@ -554,6 +659,91 @@ mod tests {
                 GestureId::Circle
             );
         }
+    }
+
+    #[test]
+    fn circle_accepts_moderate_overshoot_in_both_directions() {
+        let recognizer = Recognizer::new();
+        for candidate in [
+            arc(
+                Point::new(90.0, 60.0),
+                58.0,
+                47.0,
+                PI / 6.0,
+                PI / 6.0 + 2.34 * PI,
+            ),
+            arc(
+                Point::new(90.0, 60.0),
+                46.0,
+                59.0,
+                4.0 * PI / 5.0,
+                4.0 * PI / 5.0 - 2.34 * PI,
+            ),
+        ] {
+            let normalized = normalized_points(&candidate).unwrap();
+            let evidence = circle_evidence(&normalized);
+            assert!(has_self_intersection(&normalized));
+            assert!(evidence.intersecting_near_closed);
+            assert_eq!(
+                recognizer
+                    .recognize(&jitter(&candidate, 0.35), 0.82)
+                    .unwrap()
+                    .gesture,
+                GestureId::Circle
+            );
+        }
+    }
+
+    #[test]
+    fn distant_crossing_does_not_turn_an_open_gesture_into_a_circle() {
+        let crossed_open_stroke = line(&[
+            (90.0, 0.0),
+            (10.0, 82.0),
+            (92.0, 78.0),
+            (8.0, 18.0),
+            (90.0, 100.0),
+        ]);
+        let normalized = normalized_points(&crossed_open_stroke).unwrap();
+        let evidence = circle_evidence(&normalized);
+        assert!(has_self_intersection(&normalized));
+        assert!(!evidence.strongly_closed);
+        assert!(!evidence.intersecting_near_closed);
+
+        let recognized = Recognizer::new().recognize(&crossed_open_stroke, 0.82);
+        assert_ne!(
+            recognized.map(|matched| matched.gesture),
+            Some(GestureId::Circle)
+        );
+    }
+
+    #[test]
+    fn personalized_overdrawn_circle_remains_eligible() {
+        let learned = arc(
+            Point::new(80.0, 70.0),
+            56.0,
+            48.0,
+            PI / 9.0,
+            PI / 9.0 + 2.32 * PI,
+        );
+        let sample = UserGestureTemplate::from_stroke(GestureId::Circle, &learned)
+            .expect("overdrawn circle should be learnable");
+        let mut recognizer = Recognizer::new();
+        recognizer.set_user_templates(&[sample]);
+
+        let candidate = arc(
+            Point::new(180.0, 130.0),
+            84.0,
+            70.0,
+            PI / 10.0,
+            PI / 10.0 + 2.35 * PI,
+        );
+        assert_eq!(
+            recognizer
+                .recognize(&jitter(&candidate, 0.25), 0.82)
+                .unwrap()
+                .gesture,
+            GestureId::Circle
+        );
     }
 
     #[test]

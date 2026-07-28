@@ -17,6 +17,7 @@ use windows::{
 
 pub const APP_DIR_NAME: &str = "Xmouse";
 pub const DEFAULT_SEARCH_URL: &str = "https://www.google.com/search?q={query}";
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 const LEGACY_BING_SEARCH_URL: &str = "https://www.bing.com/search?q={query}";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -102,7 +103,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            schema_version: 1,
+            schema_version: CURRENT_SCHEMA_VERSION,
             enabled: true,
             dark_mode: false,
             trigger: TriggerButton::Right,
@@ -123,7 +124,7 @@ impl Default for AppConfig {
 
 impl AppConfig {
     pub fn validate(&self) -> Result<()> {
-        if self.schema_version != 1 {
+        if self.schema_version != CURRENT_SCHEMA_VERSION {
             bail!("不支持的配置版本 {}", self.schema_version);
         }
         if !(50..=1_000).contains(&self.activation_delay_ms) {
@@ -219,8 +220,10 @@ pub fn default_action(gesture: GestureId) -> ActionKind {
         GestureId::LetterS => ActionKind::SearchSelection,
         GestureId::LetterC => ActionKind::CopySelection,
         GestureId::LetterV => ActionKind::OpenHistory,
-        GestureId::Left => ActionKind::SwitchDesktopLeft,
-        GestureId::Right => ActionKind::SwitchDesktopRight,
+        GestureId::Left => ActionKind::SwitchDesktopRight,
+        GestureId::Right => ActionKind::SwitchDesktopLeft,
+        GestureId::Seven => ActionKind::TaskManager,
+        GestureId::Circle => ActionKind::ScreenSnip,
     }
 }
 
@@ -256,11 +259,15 @@ pub fn load_or_create() -> Result<AppConfig> {
     let bytes = fs::read(&path).with_context(|| format!("读取配置失败：{}", path.display()))?;
     match serde_json::from_slice::<AppConfig>(&bytes) {
         Ok(mut config) => {
+            let mut changed = migrate_config(&mut config)?;
             if config.search_url_template == LEGACY_BING_SEARCH_URL {
                 config.search_url_template = DEFAULT_SEARCH_URL.to_owned();
-                save(&path, &config)?;
+                changed = true;
             }
             config.validate()?;
+            if changed {
+                save(&path, &config)?;
+            }
             Ok(config)
         }
         Err(error) => {
@@ -273,6 +280,33 @@ pub fn load_or_create() -> Result<AppConfig> {
                 backup.display()
             ))
         }
+    }
+}
+
+fn migrate_config(config: &mut AppConfig) -> Result<bool> {
+    match config.schema_version {
+        CURRENT_SCHEMA_VERSION => Ok(false),
+        1 => {
+            let old_desktop_pair = config.action_for(GestureId::Left)
+                == ActionKind::SwitchDesktopLeft
+                && config.action_for(GestureId::Right) == ActionKind::SwitchDesktopRight;
+            if old_desktop_pair {
+                config.set_action(GestureId::Left, ActionKind::SwitchDesktopRight);
+                config.set_action(GestureId::Right, ActionKind::SwitchDesktopLeft);
+            }
+            for gesture in [GestureId::Seven, GestureId::Circle] {
+                if !config
+                    .gesture_bindings
+                    .iter()
+                    .any(|binding| binding.gesture == gesture)
+                {
+                    config.set_action(gesture, default_action(gesture));
+                }
+            }
+            config.schema_version = CURRENT_SCHEMA_VERSION;
+            Ok(true)
+        }
+        version => bail!("不支持的配置版本 {version}"),
     }
 }
 
@@ -324,6 +358,16 @@ mod tests {
             config.action_for(GestureId::LetterS),
             ActionKind::SearchSelection
         );
+        assert_eq!(
+            config.action_for(GestureId::Left),
+            ActionKind::SwitchDesktopRight
+        );
+        assert_eq!(
+            config.action_for(GestureId::Right),
+            ActionKind::SwitchDesktopLeft
+        );
+        assert_eq!(config.action_for(GestureId::Seven), ActionKind::TaskManager);
+        assert_eq!(config.action_for(GestureId::Circle), ActionKind::ScreenSnip);
         config.validate().expect("default remains valid");
     }
 
@@ -387,6 +431,45 @@ mod tests {
         assert_eq!(
             config.action_for(GestureId::LetterC),
             ActionKind::CopySelection
+        );
+    }
+
+    #[test]
+    fn schema_one_desktop_defaults_are_reversed_during_migration() {
+        let mut config = AppConfig::default();
+        config.schema_version = 1;
+        config
+            .gesture_bindings
+            .retain(|binding| !matches!(binding.gesture, GestureId::Seven | GestureId::Circle));
+        config.set_action(GestureId::Left, ActionKind::SwitchDesktopLeft);
+        config.set_action(GestureId::Right, ActionKind::SwitchDesktopRight);
+
+        assert!(migrate_config(&mut config).unwrap());
+        assert_eq!(config.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(
+            config.action_for(GestureId::Left),
+            ActionKind::SwitchDesktopRight
+        );
+        assert_eq!(
+            config.action_for(GestureId::Right),
+            ActionKind::SwitchDesktopLeft
+        );
+        assert_eq!(config.action_for(GestureId::Seven), ActionKind::TaskManager);
+        assert_eq!(config.action_for(GestureId::Circle), ActionKind::ScreenSnip);
+    }
+
+    #[test]
+    fn migration_preserves_custom_desktop_actions() {
+        let mut config = AppConfig::default();
+        config.schema_version = 1;
+        config.set_action(GestureId::Left, ActionKind::BrowserBack);
+        config.set_action(GestureId::Right, ActionKind::BrowserForward);
+
+        migrate_config(&mut config).unwrap();
+        assert_eq!(config.action_for(GestureId::Left), ActionKind::BrowserBack);
+        assert_eq!(
+            config.action_for(GestureId::Right),
+            ActionKind::BrowserForward
         );
     }
 }

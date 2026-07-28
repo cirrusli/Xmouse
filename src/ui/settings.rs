@@ -310,11 +310,12 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
         26,
     ));
     general_page.push(builder.label("C  复制内容        V  打开剪贴板历史", 232, 492, 590, 24));
-    general_page.push(builder.label("←  左侧桌面        →  右侧桌面", 232, 520, 590, 24));
+    general_page.push(builder.label("←  右侧桌面        →  左侧桌面", 232, 520, 590, 24));
+    general_page.push(builder.label("7  任务管理器       ○  截图工具", 232, 548, 590, 24));
     general_page.push(builder.label(
         "可在“个性化手势”中修改每条轨迹执行的动作",
         232,
-        548,
+        580,
         500,
         22,
     ));
@@ -481,7 +482,7 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
         24,
     ));
     about_page.push(builder.label(
-        "2. ← / → 切换虚拟桌面；其他手势见常规页。",
+        "2. ← / → 拖动画布切换桌面；7 打开任务管理器，○ 截图。",
         232,
         366,
         590,

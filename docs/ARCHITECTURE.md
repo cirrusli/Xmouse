@@ -29,7 +29,7 @@ flowchart LR
 | `ui/history_popup.rs` | 历史弹窗布局、搜索/列表/操作控件 | 历史查询和置顶写入 |
 | `ui/history_preview.rs` | 大图缩放、Alpha 合成和预览窗绘制 | 磁盘查询和悬停状态判断 |
 | `ui/history_view.rs` | 历史行与缩略图渲染 | 全局状态和窗口消息处理 |
-| `ui/widgets.rs` | 可复用自绘控件 | 特定页面业务逻辑 |
+| `ui/widgets.rs` | 可复用自绘控件与深色弹出菜单项 | 特定页面业务逻辑 |
 | `ui/theme.rs` | 配色、字体、DWM/子控件主题 | 页面布局 |
 | `ui/native.rs` | HWND 控件创建和公共原生操作 | 业务命令 |
 | `storage.rs` | schema、迁移、查询、去重、置顶和淘汰 | UI 文案与窗口操作 |
@@ -58,6 +58,8 @@ flowchart LR
 
 识别结果是稳定的 `GestureId`，不会直接携带动作。`AppConfig::action_for` 再把轨迹解析为 `ActionKind`；因此动作改绑不会污染识别模板或个人样本。动作集合是编译期白名单，不包含任意脚本、命令行或插件入口。
 
+圆形轨迹在方向向量匹配前增加端点闭合度预筛选；内置模板覆盖八个起点、顺逆时针与横纵椭圆。闭合轨迹只与圆形模板竞争，开放的 C 轨迹继续与其他开放轨迹比较，避免为了提高圆形容错而降低 C 的可靠性。
+
 S 动作优先读取 UI Automation 选区。失败后动作线程保存 OLE `IDataObject`、发送 `Ctrl+C`，等待剪贴板序号变化且 Unicode 文本真正可读，再恢复原数据对象。整个过程暂停历史捕获，避免临时内容进入数据库。
 
 ## 剪贴板置顶数据流
@@ -78,6 +80,8 @@ sequenceDiagram
 数据库 schema 版本存入 SQLite `user_version`。版本 2 新增 `pinned` 和 `pinned_at`，迁移是幂等的；重复内容的 UPSERT 不修改这两个字段。淘汰只选择 `pinned = 0` 的记录，因此置顶内容只能由用户显式删除或清空。
 
 历史查询由 `storage.rs::list_filtered` 接收搜索词、内容类型和来源应用。类型与来源在内容解密和缩略图解码前筛除；`ui/history_view.rs` 只接收过滤后的 `HistoryView` 并计算搜索高亮。选择记录后，`app.rs` 先同步写入剪贴板并关闭弹窗，再由 `actions.rs` 验证和激活原目标窗口后发送 `Ctrl+V`，激活失败时不会向当前前台窗口注入输入。
+
+深色来源筛选继续使用原生 `HMENU` 和 `TrackPopupMenu`，仅将菜单项切换为 `ui/widgets.rs` 的 owner-draw 绘制，并通过 `MENUINFO` 设置背景刷。菜单保持同步模态和键盘命令语义，不创建额外窗口或渲染线程。筛选分段按钮更新状态时使用无背景擦除的同步重绘，避免 Common Controls 在 owner-draw 之前短暂填充系统白色。
 
 ## 后续拆分规则
 

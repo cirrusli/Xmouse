@@ -15,6 +15,8 @@ pub const IDC_GESTURE_CLEAR: i32 = 1032;
 pub const IDC_GESTURE_LEFT: i32 = 1035;
 pub const IDC_GESTURE_RIGHT: i32 = 1036;
 pub const IDC_GESTURE_BINDING: i32 = 1039;
+pub const IDC_GESTURE_SEVEN: i32 = 1040;
+pub const IDC_GESTURE_CIRCLE: i32 = 1041;
 
 pub struct Controls {
     pub up: HWND,
@@ -24,6 +26,8 @@ pub struct Controls {
     pub letter_v: HWND,
     pub left: HWND,
     pub right: HWND,
+    pub seven: HWND,
+    pub circle: HWND,
     pub binding: HWND,
     pub clear: HWND,
     pub status: HWND,
@@ -40,6 +44,8 @@ impl Default for Controls {
             letter_v: ptr::null_mut(),
             left: ptr::null_mut(),
             right: ptr::null_mut(),
+            seven: ptr::null_mut(),
+            circle: ptr::null_mut(),
             binding: ptr::null_mut(),
             clear: ptr::null_mut(),
             status: ptr::null_mut(),
@@ -62,7 +68,11 @@ pub fn create_controls(hwnd: HWND, body_font: HFONT, section_font: HFONT) -> Con
     let letter_v = choice(&builder, "V 字形", 720, 154, IDC_GESTURE_V);
     let left = choice(&builder, "← 左划", 232, 202, IDC_GESTURE_LEFT);
     let right = choice(&builder, "→ 右划", 354, 202, IDC_GESTURE_RIGHT);
-    page.extend([up, letter_l, letter_s, letter_c, letter_v, left, right]);
+    let seven = choice(&builder, "7 字形", 476, 202, IDC_GESTURE_SEVEN);
+    let circle = choice(&builder, "○ 圆形", 598, 202, IDC_GESTURE_CIRCLE);
+    page.extend([
+        up, letter_l, letter_s, letter_c, letter_v, left, right, seven, circle,
+    ]);
 
     let status = builder.label("", 232, 244, 590, 22);
     page.push(status);
@@ -99,6 +109,8 @@ pub fn create_controls(hwnd: HWND, body_font: HFONT, section_font: HFONT) -> Con
         letter_v,
         left,
         right,
+        seven,
+        circle,
         binding,
         clear,
         status,

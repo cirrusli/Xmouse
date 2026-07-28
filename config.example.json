@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "enabled": true,
   "dark_mode": false,
   "trigger": "right",
@@ -17,8 +17,10 @@
     { "gesture": "letter_s", "action": "search_selection" },
     { "gesture": "letter_c", "action": "copy_selection" },
     { "gesture": "letter_v", "action": "open_history" },
-    { "gesture": "left", "action": "switch_desktop_left" },
-    { "gesture": "right", "action": "switch_desktop_right" }
+    { "gesture": "left", "action": "switch_desktop_right" },
+    { "gesture": "right", "action": "switch_desktop_left" },
+    { "gesture": "seven", "action": "task_manager" },
+    { "gesture": "circle", "action": "screen_snip" }
   ],
   "gesture_guard": {
     "disable_in_fullscreen_apps": true,

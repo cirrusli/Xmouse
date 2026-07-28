@@ -33,7 +33,7 @@ use std::{
     ptr,
     sync::{
         Arc, RwLock,
-        atomic::{AtomicPtr, Ordering},
+        atomic::{AtomicBool, AtomicPtr, Ordering},
         mpsc::{self, Sender},
     },
     thread,
@@ -68,7 +68,7 @@ use windows_sys::Win32::{
     UI::{
         Controls::{
             DRAWITEMSTRUCT, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx,
-            WM_MOUSELEAVE,
+            MEASUREITEMSTRUCT, ODT_MENU, WM_MOUSELEAVE,
         },
         HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext},
         Input::KeyboardAndMouse::{
@@ -88,19 +88,21 @@ use windows_sys::Win32::{
             IDI_APPLICATION, IDYES, IsWindow, IsWindowVisible, KillTimer, LB_ADDSTRING,
             LB_GETCURSEL, LB_ITEMFROMPOINT, LB_RESETCONTENT, LB_SETCURSEL, LBN_DBLCLK,
             LBN_SELCHANGE, LWA_ALPHA, LWA_COLORKEY, LoadCursorW, LoadIconW, MB_ICONERROR,
-            MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO, MF_CHECKED, MF_POPUP,
-            MF_SEPARATOR, MF_STRING, MSG, MessageBoxW, PostQuitMessage, RegisterClassExW,
+            MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO, MENUINFO, MENUITEMINFOW,
+            MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MFT_OWNERDRAW, MIIM_DATA, MIIM_FTYPE,
+            MIM_BACKGROUND, MSG, MessageBoxW, PostQuitMessage, RegisterClassExW,
             SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE,
             SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SendMessageW,
-            SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW,
-            SetWindowPos, SetWindowTextW, ShowWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
-            TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WA_INACTIVE,
-            WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CLIPBOARDUPDATE, WM_CLOSE, WM_COMMAND,
-            WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY,
-            WM_DRAWITEM, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-            WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_CAPTION,
-            WS_CLIPCHILDREN, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-            WS_EX_TRANSPARENT, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU,
+            SetForegroundWindow, SetLayeredWindowAttributes, SetMenuInfo, SetMenuItemInfoW,
+            SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TPM_BOTTOMALIGN,
+            TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
+            WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CLIPBOARDUPDATE, WM_CLOSE,
+            WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC,
+            WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+            WM_MEASUREITEM, WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_TIMER,
+            WNDCLASSEXW, WS_CAPTION, WS_CLIPCHILDREN, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+            WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MINIMIZEBOX, WS_OVERLAPPED,
+            WS_POPUP, WS_SYSMENU,
         },
     },
 };
@@ -122,6 +124,8 @@ const IDM_GESTURE_ACTION_BASE: usize = 4000;
 const RESOURCE_TIMER_ID: usize = 2;
 const WM_APP_HISTORY_PREVIEW_READY: u32 = 0x8008;
 static APP_STATE: AtomicPtr<AppState> = AtomicPtr::new(ptr::null_mut());
+static DARK_HISTORY_MENU_ACTIVE: AtomicBool = AtomicBool::new(false);
+static DARK_HISTORY_MENU_FONT: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
 struct PreviewResponse {
     item_id: i64,
@@ -784,6 +788,8 @@ unsafe extern "system" fn main_proc(
                     IDC_GESTURE_V => select_gesture_training_id(state, GestureId::LetterV),
                     IDC_GESTURE_LEFT => select_gesture_training_id(state, GestureId::Left),
                     IDC_GESTURE_RIGHT => select_gesture_training_id(state, GestureId::Right),
+                    IDC_GESTURE_SEVEN => select_gesture_training_id(state, GestureId::Seven),
+                    IDC_GESTURE_CIRCLE => select_gesture_training_id(state, GestureId::Circle),
                     IDC_GESTURE_BINDING => show_gesture_action_menu(state),
                     IDC_GESTURE_CLEAR => clear_current_gesture_samples(state),
                     id if id as usize == IDM_SETTINGS => unsafe {
@@ -975,7 +981,7 @@ unsafe extern "system" fn main_proc(
                 }
                 IDC_TRIGGER_RIGHT | IDC_TRIGGER_X1 | IDC_TRIGGER_X2 | IDC_GESTURE_UP
                 | IDC_GESTURE_L | IDC_GESTURE_S | IDC_GESTURE_C | IDC_GESTURE_V
-                | IDC_GESTURE_LEFT | IDC_GESTURE_RIGHT => {
+                | IDC_GESTURE_LEFT | IDC_GESTURE_RIGHT | IDC_GESTURE_SEVEN | IDC_GESTURE_CIRCLE => {
                     draw_choice(draw);
                     1
                 }
@@ -1103,9 +1109,28 @@ unsafe extern "system" fn history_proc(
             }
             0
         }
+        WM_MEASUREITEM => {
+            let measure = unsafe { &mut *(lparam as *mut MEASUREITEMSTRUCT) };
+            let menu_font = DARK_HISTORY_MENU_FONT.load(Ordering::Acquire);
+            let handled = DARK_HISTORY_MENU_ACTIVE.load(Ordering::Acquire)
+                && !menu_font.is_null()
+                && widgets::measure_popup_menu_item(hwnd, measure, menu_font);
+            if handled {
+                1
+            } else {
+                unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+            }
+        }
         WM_DRAWITEM => {
             let draw = unsafe { &*(lparam as *const DRAWITEMSTRUCT) };
-            if draw.CtlID as i32 == IDC_HISTORY_LIST {
+            let menu_font = DARK_HISTORY_MENU_FONT.load(Ordering::Acquire);
+            let dark_menu_handled = draw.CtlType == ODT_MENU
+                && DARK_HISTORY_MENU_ACTIVE.load(Ordering::Acquire)
+                && !menu_font.is_null()
+                && widgets::draw_popup_menu_item(draw, palette(true), menu_font);
+            if dark_menu_handled {
+                1
+            } else if draw.CtlID as i32 == IDC_HISTORY_LIST {
                 draw_history_item(draw);
                 1
             } else if matches!(
@@ -1555,6 +1580,8 @@ fn gesture_control(state: &AppState, gesture: GestureId) -> HWND {
         GestureId::LetterV => state.controls.gesture.letter_v,
         GestureId::Left => state.controls.gesture.left,
         GestureId::Right => state.controls.gesture.right,
+        GestureId::Seven => state.controls.gesture.seven,
+        GestureId::Circle => state.controls.gesture.circle,
     }
 }
 
@@ -1658,6 +1685,8 @@ fn show_gesture_action_menu(state: &mut AppState) {
             ActionKind::SwitchDesktopRight,
             ActionKind::ShowDesktop,
             ActionKind::TaskView,
+            ActionKind::TaskManager,
+            ActionKind::ScreenSnip,
         ],
         selected_action,
     );
@@ -1984,7 +2013,7 @@ fn read_config_from_controls(state: &AppState) -> Result<AppConfig> {
         TriggerButton::Right
     };
     let config = AppConfig {
-        schema_version: 1,
+        schema_version: current.schema_version,
         enabled: is_checked(state.controls.enabled),
         dark_mode: is_checked(state.controls.dark_mode),
         trigger,
@@ -2156,9 +2185,7 @@ fn refresh_history_filter_controls(state: &AppState) {
         ),
     ] {
         set_check(control, selected);
-        unsafe {
-            InvalidateRect(control, ptr::null(), 1);
-        }
+        redraw_control_without_erase(control);
     }
     let source_label = state
         .history_source_filter
@@ -2166,9 +2193,7 @@ fn refresh_history_filter_controls(state: &AppState) {
         .map(|source| format!("应用：{source}  ▾"))
         .unwrap_or_else(|| "所有应用  ▾".to_owned());
     set_control_text(state.history_filter_source, &source_label);
-    unsafe {
-        InvalidateRect(state.history_filter_source, ptr::null(), 1);
-    }
+    redraw_control_without_erase(state.history_filter_source);
 }
 
 fn show_history_source_menu(state: &mut AppState) {
@@ -2186,17 +2211,57 @@ fn show_history_source_menu(state: &mut AppState) {
     if menu.is_null() {
         return;
     }
-    append_menu(
-        menu,
-        MF_STRING
-            | if state.history_source_filter.is_none() {
-                MF_CHECKED
-            } else {
-                0
-            },
-        IDM_HISTORY_SOURCE_BASE,
-        "所有应用",
-    );
+    let dark_mode = state.dark_mode;
+    let dark_menu_items: Vec<Box<widgets::PopupMenuItemData>> = if dark_mode {
+        std::iter::once("所有应用")
+            .chain(sources.iter().map(String::as_str))
+            .map(|source| {
+                Box::new(widgets::PopupMenuItemData::new(
+                    source,
+                    if source == "所有应用" {
+                        state.history_source_filter.is_none()
+                    } else {
+                        state
+                            .history_source_filter
+                            .as_deref()
+                            .is_some_and(|selected| selected.eq_ignore_ascii_case(source))
+                    },
+                ))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let menu_background = if dark_mode {
+        let brush = unsafe { CreateSolidBrush(palette(true).card) };
+        let info = MENUINFO {
+            cbSize: mem::size_of::<MENUINFO>() as u32,
+            fMask: MIM_BACKGROUND,
+            hbrBack: brush,
+            ..Default::default()
+        };
+        unsafe {
+            SetMenuInfo(menu, &info);
+        }
+        brush
+    } else {
+        ptr::null_mut()
+    };
+    if dark_mode {
+        append_owner_draw_menu_item(menu, IDM_HISTORY_SOURCE_BASE, &dark_menu_items[0]);
+    } else {
+        append_menu(
+            menu,
+            MF_STRING
+                | if state.history_source_filter.is_none() {
+                    MF_CHECKED
+                } else {
+                    0
+                },
+            IDM_HISTORY_SOURCE_BASE,
+            "所有应用",
+        );
+    }
     if !sources.is_empty() {
         unsafe {
             AppendMenuW(menu, MF_SEPARATOR, 0, ptr::null());
@@ -2207,17 +2272,29 @@ fn show_history_source_menu(state: &mut AppState) {
             .history_source_filter
             .as_deref()
             .is_some_and(|selected| selected.eq_ignore_ascii_case(source));
-        append_menu(
-            menu,
-            MF_STRING | if checked { MF_CHECKED } else { 0 },
-            IDM_HISTORY_SOURCE_BASE + index + 1,
-            source,
-        );
+        if dark_mode {
+            append_owner_draw_menu_item(
+                menu,
+                IDM_HISTORY_SOURCE_BASE + index + 1,
+                &dark_menu_items[index + 1],
+            );
+        } else {
+            append_menu(
+                menu,
+                MF_STRING | if checked { MF_CHECKED } else { 0 },
+                IDM_HISTORY_SOURCE_BASE + index + 1,
+                source,
+            );
+        }
     }
     let mut button_rect = RECT::default();
     unsafe {
         GetWindowRect(state.history_filter_source, &mut button_rect);
         SetForegroundWindow(state.history_hwnd);
+    }
+    if dark_mode {
+        DARK_HISTORY_MENU_FONT.store(state.font_body, Ordering::Release);
+        DARK_HISTORY_MENU_ACTIVE.store(true, Ordering::Release);
     }
     let command = unsafe {
         TrackPopupMenu(
@@ -2230,8 +2307,13 @@ fn show_history_source_menu(state: &mut AppState) {
             ptr::null(),
         )
     } as usize;
+    DARK_HISTORY_MENU_ACTIVE.store(false, Ordering::Release);
+    DARK_HISTORY_MENU_FONT.store(ptr::null_mut(), Ordering::Release);
     unsafe {
         DestroyMenu(menu);
+        if !menu_background.is_null() {
+            DeleteObject(menu_background);
+        }
     }
     if command == 0 {
         return;
@@ -2638,7 +2720,7 @@ fn paint_main_window(hwnd: HWND) {
         SettingsPage::General => &[
             (214, 100, 858, 246, 18),
             (214, 262, 858, 372, 18),
-            (214, 394, 858, 584, 18),
+            (214, 394, 858, 616, 18),
         ],
         SettingsPage::History => &[(214, 100, 858, 246, 18), (214, 260, 858, 426, 18)],
         SettingsPage::Gestures => &[(214, 100, 858, 270, 18), (214, 278, 858, 632, 18)],
@@ -3020,6 +3102,33 @@ fn append_menu(menu: HMENU, flags: u32, id: usize, text: &str) {
     let text = wide(text);
     unsafe {
         AppendMenuW(menu, flags, id, text.as_ptr());
+    }
+}
+
+fn append_owner_draw_menu_item(menu: HMENU, id: usize, item: &widgets::PopupMenuItemData) {
+    let appended = unsafe { AppendMenuW(menu, MF_STRING, id, item.text_ptr()) };
+    if appended == 0 {
+        return;
+    }
+    let info = MENUITEMINFOW {
+        cbSize: mem::size_of::<MENUITEMINFOW>() as u32,
+        fMask: MIIM_FTYPE | MIIM_DATA,
+        fType: MFT_OWNERDRAW,
+        dwItemData: item as *const widgets::PopupMenuItemData as usize,
+        ..Default::default()
+    };
+    unsafe {
+        SetMenuItemInfoW(menu, id as u32, 0, &info);
+    }
+}
+
+fn redraw_control_without_erase(control: HWND) {
+    if control.is_null() {
+        return;
+    }
+    unsafe {
+        InvalidateRect(control, ptr::null(), 0);
+        UpdateWindow(control);
     }
 }
 

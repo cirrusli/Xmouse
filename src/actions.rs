@@ -29,8 +29,9 @@ use windows_sys::Win32::{
     UI::{
         Input::KeyboardAndMouse::{
             INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
-            VK_BROWSER_BACK, VK_BROWSER_FORWARD, VK_CONTROL, VK_LEFT, VK_LWIN, VK_MEDIA_PLAY_PAUSE,
-            VK_RIGHT, VK_TAB, VK_VOLUME_DOWN, VK_VOLUME_MUTE, VK_VOLUME_UP,
+            VK_BROWSER_BACK, VK_BROWSER_FORWARD, VK_CONTROL, VK_ESCAPE, VK_LEFT, VK_LWIN,
+            VK_MEDIA_PLAY_PAUSE, VK_RIGHT, VK_SHIFT, VK_TAB, VK_VOLUME_DOWN, VK_VOLUME_MUTE,
+            VK_VOLUME_UP,
         },
         Shell::ShellExecuteW,
         WindowsAndMessaging::{
@@ -167,6 +168,12 @@ fn execute_action(
             post_toast(ui_hwnd, "已打开任务视图");
             Ok(())
         }
+        ActionKind::TaskManager => {
+            send_task_manager_shortcut()?;
+            post_toast(ui_hwnd, "已打开任务管理器");
+            Ok(())
+        }
+        ActionKind::ScreenSnip => send_screen_snip_shortcut(),
         ActionKind::VolumeMute => send_global_key(VK_VOLUME_MUTE, ui_hwnd, "已切换静音"),
         ActionKind::VolumeDown => send_global_key(VK_VOLUME_DOWN, ui_hwnd, "已降低音量"),
         ActionKind::VolumeUp => send_global_key(VK_VOLUME_UP, ui_hwnd, "已提高音量"),
@@ -289,6 +296,31 @@ fn send_windows_key(key: u16) -> Result<()> {
         keyboard_input(VK_LWIN, KEYEVENTF_KEYUP),
     ];
     send_inputs(&mut inputs, "Windows 快捷键被系统拒绝")
+}
+
+fn send_task_manager_shortcut() -> Result<()> {
+    let mut inputs = [
+        keyboard_input(VK_CONTROL, 0),
+        keyboard_input(VK_SHIFT, 0),
+        keyboard_input(VK_ESCAPE, 0),
+        keyboard_input(VK_ESCAPE, KEYEVENTF_KEYUP),
+        keyboard_input(VK_SHIFT, KEYEVENTF_KEYUP),
+        keyboard_input(VK_CONTROL, KEYEVENTF_KEYUP),
+    ];
+    send_inputs(&mut inputs, "任务管理器快捷键被系统拒绝")
+}
+
+fn send_screen_snip_shortcut() -> Result<()> {
+    let mut inputs = [
+        keyboard_input(VK_LWIN, 0),
+        keyboard_input(VK_SHIFT, 0),
+        keyboard_input(b'S' as u16, 0),
+        keyboard_input(b'S' as u16, KEYEVENTF_KEYUP),
+        keyboard_input(VK_SHIFT, KEYEVENTF_KEYUP),
+        keyboard_input(VK_LWIN, KEYEVENTF_KEYUP),
+    ];
+    // Do not show an Xmouse toast here: a topmost toast could be captured by the snipping layer.
+    send_inputs(&mut inputs, "截图快捷键被系统拒绝")
 }
 
 fn set_window_show_state(target: HWND, command: i32, message: &str, ui_hwnd: isize) -> Result<()> {

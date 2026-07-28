@@ -37,10 +37,12 @@ pub enum GestureId {
     Left,
     #[serde(alias = "switch_desktop_right")]
     Right,
+    Seven,
+    Circle,
 }
 
 impl GestureId {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 9] = [
         Self::Up,
         Self::LetterL,
         Self::LetterS,
@@ -48,6 +50,8 @@ impl GestureId {
         Self::LetterV,
         Self::Left,
         Self::Right,
+        Self::Seven,
+        Self::Circle,
     ];
 
     pub fn short_label(self) -> &'static str {
@@ -59,6 +63,8 @@ impl GestureId {
             Self::LetterV => "V 字形",
             Self::Left => "← 左划",
             Self::Right => "→ 右划",
+            Self::Seven => "7 字形",
+            Self::Circle => "○ 圆形",
         }
     }
 
@@ -72,6 +78,8 @@ impl GestureId {
             Self::LetterV => "V 字形",
             Self::Left => "左划",
             Self::Right => "右划",
+            Self::Seven => "7 字形",
+            Self::Circle => "圆形",
         }
     }
 }
@@ -111,6 +119,7 @@ pub struct GestureMatch {
 struct Template {
     gesture: GestureId,
     vector: Vec<f32>,
+    closed: bool,
 }
 
 pub struct Recognizer {
@@ -130,7 +139,11 @@ impl Recognizer {
         for (gesture, variants) in template_points() {
             for points in variants {
                 if let Some(vector) = normalize(&points) {
-                    templates.push(Template { gesture, vector });
+                    templates.push(Template {
+                        gesture,
+                        vector,
+                        closed: gesture == GestureId::Circle,
+                    });
                 }
             }
         }
@@ -147,6 +160,7 @@ impl Recognizer {
                 normalize(&sample.points).map(|vector| Template {
                     gesture: sample.gesture,
                     vector,
+                    closed: sample.gesture == GestureId::Circle,
                 })
             })
             .collect();
@@ -154,6 +168,7 @@ impl Recognizer {
 
     pub fn recognize(&self, points: &[Point], threshold: f32) -> Option<GestureMatch> {
         let candidate = normalize(points)?;
+        let candidate_closed = is_closed_path(points);
         let mut by_gesture: Vec<(GestureId, f32)> = Vec::new();
 
         for template in self
@@ -161,6 +176,9 @@ impl Recognizer {
             .iter()
             .chain(self.user_templates.iter())
         {
+            if template.closed != candidate_closed {
+                continue;
+            }
             let score = cosine_similarity(&candidate, &template.vector);
             if let Some((_, best)) = by_gesture
                 .iter_mut()
@@ -178,6 +196,21 @@ impl Recognizer {
         let margin = score - second;
         (score >= threshold && margin >= MIN_MARGIN).then_some(GestureMatch { gesture, score })
     }
+}
+
+fn is_closed_path(points: &[Point]) -> bool {
+    let Some(first) = points.first().copied() else {
+        return false;
+    };
+    let Some(last) = points.last().copied() else {
+        return false;
+    };
+    let min_x = points.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
+    let max_x = points.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max);
+    let min_y = points.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+    let max_y = points.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max);
+    let span = (max_x - min_x).max(max_y - min_y);
+    span.is_finite() && span > f32::EPSILON && first.distance(last) / span <= 0.40
 }
 
 fn path_length(points: &[Point]) -> f32 {
@@ -333,6 +366,11 @@ fn template_points() -> Vec<(GestureId, Vec<Vec<Point>>)> {
         line(&[(0.0, 0.0), (50.0, 100.0), (100.0, 0.0)]),
         line(&[(5.0, 0.0), (48.0, 95.0), (95.0, 0.0)]),
     ];
+    let seven = vec![
+        line(&[(0.0, 4.0), (100.0, 4.0), (28.0, 100.0)]),
+        line(&[(4.0, 0.0), (96.0, 5.0), (22.0, 100.0)]),
+        line(&[(0.0, 8.0), (100.0, 0.0), (35.0, 100.0)]),
+    ];
     let c = vec![
         arc(
             Point::new(50.0, 50.0),
@@ -363,6 +401,27 @@ fn template_points() -> Vec<(GestureId, Vec<Vec<Point>>)> {
         (8.0, 92.0),
     ]);
 
+    let mut circles = Vec::new();
+    for (radius_x, radius_y) in [(50.0, 50.0), (52.0, 44.0), (44.0, 52.0)] {
+        for start_index in 0..8 {
+            let start = start_index as f32 * PI / 4.0;
+            circles.push(arc(
+                Point::new(50.0, 50.0),
+                radius_x,
+                radius_y,
+                start,
+                start + 2.0 * PI,
+            ));
+            circles.push(arc(
+                Point::new(50.0, 50.0),
+                radius_x,
+                radius_y,
+                start,
+                start - 2.0 * PI,
+            ));
+        }
+    }
+
     vec![
         (GestureId::Up, up),
         (GestureId::LetterL, l),
@@ -371,6 +430,8 @@ fn template_points() -> Vec<(GestureId, Vec<Vec<Point>>)> {
         (GestureId::LetterV, v),
         (GestureId::Left, desktop_left),
         (GestureId::Right, desktop_right),
+        (GestureId::Seven, seven),
+        (GestureId::Circle, circles),
     ]
 }
 
@@ -456,6 +517,55 @@ mod tests {
         assert_eq!(
             recognizer.recognize(&right, 0.82).unwrap().gesture,
             GestureId::Right
+        );
+    }
+
+    #[test]
+    fn circle_is_tolerant_of_start_point_direction_and_aspect_ratio() {
+        let recognizer = Recognizer::new();
+        for candidate in [
+            arc(
+                Point::new(90.0, 60.0),
+                62.0,
+                48.0,
+                PI / 7.0,
+                PI / 7.0 + 2.0 * PI,
+            ),
+            arc(
+                Point::new(90.0, 60.0),
+                44.0,
+                60.0,
+                5.0 * PI / 6.0,
+                5.0 * PI / 6.0 - 2.0 * PI,
+            ),
+            arc(
+                Point::new(90.0, 60.0),
+                57.0,
+                46.0,
+                PI / 3.0,
+                PI / 3.0 + 1.85 * PI,
+            ),
+        ] {
+            assert_eq!(
+                recognizer
+                    .recognize(&jitter(&candidate, 0.35), 0.82)
+                    .unwrap()
+                    .gesture,
+                GestureId::Circle
+            );
+        }
+    }
+
+    #[test]
+    fn seven_does_not_collide_with_l_or_v() {
+        let recognizer = Recognizer::new();
+        let candidate = line(&[(6.0, 3.0), (96.0, 6.0), (30.0, 98.0)]);
+        assert_eq!(
+            recognizer
+                .recognize(&jitter(&candidate, 0.25), 0.82)
+                .unwrap()
+                .gesture,
+            GestureId::Seven
         );
     }
 

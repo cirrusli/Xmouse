@@ -18,6 +18,8 @@ pub enum ActionKind {
     MaximizeRestore,
     ShowDesktop,
     TaskView,
+    TaskManager,
+    ScreenSnip,
     VolumeMute,
     VolumeDown,
     VolumeUp,
@@ -25,7 +27,7 @@ pub enum ActionKind {
 }
 
 impl ActionKind {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 21] = [
         Self::Disabled,
         Self::ToggleTopmost,
         Self::CloseTab,
@@ -41,6 +43,8 @@ impl ActionKind {
         Self::SwitchDesktopRight,
         Self::ShowDesktop,
         Self::TaskView,
+        Self::TaskManager,
+        Self::ScreenSnip,
         Self::VolumeMute,
         Self::VolumeDown,
         Self::VolumeUp,
@@ -64,6 +68,8 @@ impl ActionKind {
             Self::MaximizeRestore => "最大化 / 还原窗口",
             Self::ShowDesktop => "显示桌面",
             Self::TaskView => "任务视图",
+            Self::TaskManager => "打开任务管理器",
+            Self::ScreenSnip => "打开截图工具",
             Self::VolumeMute => "静音 / 取消静音",
             Self::VolumeDown => "降低音量",
             Self::VolumeUp => "提高音量",

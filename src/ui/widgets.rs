@@ -1,17 +1,38 @@
 use super::theme::{ACCENT_COLOR, Palette, rgb};
 use std::ffi::c_void;
 use windows_sys::Win32::{
-    Foundation::{COLORREF, RECT},
+    Foundation::{COLORREF, HWND, RECT, SIZE},
     Graphics::Gdi::{
         CreatePen, CreateSolidBrush, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE,
-        DT_VCENTER, DeleteObject, DrawTextW, Ellipse, FillRect, HFONT, PS_SOLID, RoundRect,
-        SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+        DT_VCENTER, DeleteObject, DrawTextW, Ellipse, FillRect, GetDC, GetTextExtentPoint32W,
+        HFONT, LineTo, MoveToEx, PS_SOLID, ReleaseDC, RoundRect, SelectObject, SetBkMode,
+        SetTextColor, TRANSPARENT,
     },
     UI::{
-        Controls::{DRAWITEMSTRUCT, ODS_DISABLED, ODS_SELECTED},
+        Controls::{
+            DRAWITEMSTRUCT, MEASUREITEMSTRUCT, ODS_DISABLED, ODS_HOTLIGHT, ODS_SELECTED, ODT_MENU,
+        },
         WindowsAndMessaging::{GetWindowTextLengthW, GetWindowTextW},
     },
 };
+
+pub struct PopupMenuItemData {
+    text: Vec<u16>,
+    checked: bool,
+}
+
+impl PopupMenuItemData {
+    pub fn new(text: &str, checked: bool) -> Self {
+        Self {
+            text: wide(text),
+            checked,
+        }
+    }
+
+    pub fn text_ptr(&self) -> *const u16 {
+        self.text.as_ptr()
+    }
+}
 
 #[derive(Clone, Copy)]
 pub enum ButtonRole {
@@ -315,6 +336,79 @@ pub fn draw_choice(draw: &DRAWITEMSTRUCT, colors: Palette, font: HFONT, selected
         );
         SelectObject(draw.hDC, old_font);
     }
+}
+
+pub fn measure_popup_menu_item(owner: HWND, measure: &mut MEASUREITEMSTRUCT, font: HFONT) -> bool {
+    if measure.CtlType != ODT_MENU || measure.itemData == 0 {
+        return false;
+    }
+    let item = unsafe { &*(measure.itemData as *const PopupMenuItemData) };
+    let text_length = item.text.len().saturating_sub(1) as i32;
+    let hdc = unsafe { GetDC(owner) };
+    let mut size = SIZE::default();
+    if !hdc.is_null() {
+        let previous_font = unsafe { SelectObject(hdc, font) };
+        unsafe {
+            GetTextExtentPoint32W(hdc, item.text.as_ptr(), text_length, &mut size);
+            SelectObject(hdc, previous_font);
+            ReleaseDC(owner, hdc);
+        }
+    }
+    measure.itemWidth = (size.cx.max(112) + 52).clamp(180, 380) as u32;
+    measure.itemHeight = 34;
+    true
+}
+
+pub fn draw_popup_menu_item(draw: &DRAWITEMSTRUCT, colors: Palette, font: HFONT) -> bool {
+    if draw.CtlType != ODT_MENU || draw.itemData == 0 {
+        return false;
+    }
+    let item = unsafe { &*(draw.itemData as *const PopupMenuItemData) };
+    let selected = draw.itemState & (ODS_SELECTED | ODS_HOTLIGHT) != 0;
+    let background = unsafe { CreateSolidBrush(if selected { colors.hover } else { colors.card }) };
+    unsafe {
+        FillRect(draw.hDC, &draw.rcItem, background);
+        DeleteObject(background);
+        SetBkMode(draw.hDC, TRANSPARENT as i32);
+        SetTextColor(draw.hDC, colors.text);
+    }
+
+    if item.checked {
+        let pen = unsafe { CreatePen(PS_SOLID, 2, ACCENT_COLOR) };
+        let previous_pen = unsafe { SelectObject(draw.hDC, pen) };
+        let center_y = (draw.rcItem.top + draw.rcItem.bottom) / 2;
+        unsafe {
+            MoveToEx(
+                draw.hDC,
+                draw.rcItem.left + 11,
+                center_y,
+                std::ptr::null_mut(),
+            );
+            LineTo(draw.hDC, draw.rcItem.left + 15, center_y + 4);
+            LineTo(draw.hDC, draw.rcItem.left + 23, center_y - 5);
+            SelectObject(draw.hDC, previous_pen);
+            DeleteObject(pen);
+        }
+    }
+
+    let mut text_rect = RECT {
+        left: draw.rcItem.left + 34,
+        top: draw.rcItem.top,
+        right: draw.rcItem.right - 12,
+        bottom: draw.rcItem.bottom,
+    };
+    let previous_font = unsafe { SelectObject(draw.hDC, font) };
+    unsafe {
+        DrawTextW(
+            draw.hDC,
+            item.text.as_ptr(),
+            -1,
+            &mut text_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+        SelectObject(draw.hDC, previous_font);
+    }
+    true
 }
 
 fn window_text(hwnd: *mut c_void) -> String {

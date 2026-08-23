@@ -1,0 +1,56 @@
+name: Quality
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy, llvm-tools-preview
+
+      - name: Verify regression test census
+        shell: pwsh
+        run: ./scripts/verify-test-baseline.ps1
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --release --all-targets --features ci-bundled-sqlite -- -D warnings
+
+      - name: Run release tests
+        run: cargo test --release --features ci-bundled-sqlite
+
+      - name: Install coverage tool
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate coverage report
+        run: cargo llvm-cov --features ci-bundled-sqlite --lcov --output-path coverage.lcov --fail-under-lines 10
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: xmouse-coverage
+          path: coverage.lcov
+          if-no-files-found: error

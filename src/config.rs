@@ -436,8 +436,10 @@ mod tests {
 
     #[test]
     fn schema_one_desktop_defaults_are_reversed_during_migration() {
-        let mut config = AppConfig::default();
-        config.schema_version = 1;
+        let mut config = AppConfig {
+            schema_version: 1,
+            ..AppConfig::default()
+        };
         config
             .gesture_bindings
             .retain(|binding| !matches!(binding.gesture, GestureId::Seven | GestureId::Circle));
@@ -460,8 +462,10 @@ mod tests {
 
     #[test]
     fn migration_preserves_custom_desktop_actions() {
-        let mut config = AppConfig::default();
-        config.schema_version = 1;
+        let mut config = AppConfig {
+            schema_version: 1,
+            ..AppConfig::default()
+        };
         config.set_action(GestureId::Left, ActionKind::BrowserBack);
         config.set_action(GestureId::Right, ActionKind::BrowserForward);
 

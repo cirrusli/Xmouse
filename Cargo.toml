@@ -8,6 +8,12 @@ authors = ["cirrusli"]
 repository = "https://github.com/cirrusli/Xmouse"
 homepage = "https://github.com/cirrusli/Xmouse"
 
+[features]
+# CI uses a self-contained SQLite build so Windows runners do not depend on a
+# preinstalled sqlite3 import library. Normal release builds keep using the
+# small shared sqlite3.dll shipped in the portable package.
+ci-bundled-sqlite = ["rusqlite/bundled"]
+
 [dependencies]
 anyhow = "1.0"
 image = { version = "0.25", default-features = false, features = ["png"] }

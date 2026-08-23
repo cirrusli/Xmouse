@@ -30,6 +30,7 @@ Xmouse 是面向 Windows 10/11 x64 的轻量鼠标手势与剪贴板历史工具
 
 - 产品需求、技术选型与后续路线：`docs\PRODUCT-REQUIREMENTS-AND-ROADMAP.md`
 - 工程架构与模块边界：`docs\ARCHITECTURE.md`
+- 持续回归清单与变更影响映射：`docs\REGRESSION-TEST-PLAN.md`
 - 当前版本说明：`docs\RELEASE-NOTES-0.13.2.md`
 - 完整版本历史：`CHANGELOG.md`
 
@@ -92,6 +93,8 @@ Edge 内置手势与 Xmouse 都会使用“按住右键并拖动”，不建议�
 cargo test
 cargo build --release
 ```
+
+每次变更建议运行 `scripts\quality.ps1`；剪贴板相关变更运行 `scripts\quality.ps1 -ClipboardRoundTrip`。GitHub Actions 还会检查测试数量、Clippy、Release 测试并生成覆盖率报告。完整必测项见 `docs\REGRESSION-TEST-PLAN.md`。
 
 Release 可执行文件位于 `target\release\xmouse.exe`。当前版本说明见 `docs\RELEASE-NOTES-0.13.2.md`，完整变更历史见 `CHANGELOG.md`。
 

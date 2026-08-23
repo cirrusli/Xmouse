@@ -5,10 +5,11 @@ use crate::{
 };
 use anyhow::{Result, bail};
 use std::{
+    ffi::c_void,
     ptr,
     sync::{
         Arc, Mutex, OnceLock, RwLock,
-        atomic::{AtomicBool, AtomicIsize, Ordering},
+        atomic::{AtomicBool, AtomicIsize, AtomicPtr, Ordering},
         mpsc::{self, Sender},
     },
     thread,
@@ -19,16 +20,19 @@ use windows_sys::Win32::{
     Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow},
     System::LibraryLoader::GetModuleHandleW,
     UI::{
+        Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent},
         HiDpi::GetDpiForWindow,
         Input::KeyboardAndMouse::{
             INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
             MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
         },
         WindowsAndMessaging::{
-            CallNextHookEx, GA_ROOT, GetAncestor, GetForegroundWindow, GetMessageW, GetShellWindow,
-            GetWindowRect, GetWindowThreadProcessId, IsIconic, IsZoomed, MSG, MSLLHOOKSTRUCT,
-            PostMessageW, SetWindowsHookExW, UnhookWindowsHookEx, WH_MOUSE_LL, WM_MOUSEMOVE,
-            WM_RBUTTONDOWN, WM_RBUTTONUP, WM_XBUTTONDOWN, WM_XBUTTONUP, WindowFromPoint,
+            CallNextHookEx, EVENT_SYSTEM_FOREGROUND, GA_ROOT, GetAncestor, GetClassNameW,
+            GetForegroundWindow, GetMessageW, GetShellWindow, GetWindowRect,
+            GetWindowThreadProcessId, HHOOK, IsIconic, IsZoomed, MSG, MSLLHOOKSTRUCT, PostMessageW,
+            SetWindowsHookExW, UnhookWindowsHookEx, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT,
+            WINEVENT_SKIPOWNPROCESS, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_XBUTTONDOWN,
+            WM_XBUTTONUP, WindowFromPoint,
         },
     },
 };
@@ -99,6 +103,7 @@ struct HookContext {
 }
 
 static CONTEXT: OnceLock<HookContext> = OnceLock::new();
+static MOUSE_HOOK: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
 pub fn start(
     config: Arc<RwLock<AppConfig>>,
@@ -120,20 +125,74 @@ pub fn start(
         .name("xmouse-hook".to_owned())
         .spawn(move || unsafe {
             let module = GetModuleHandleW(ptr::null()) as HINSTANCE;
-            let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), module, 0);
-            let _ = ready_sender.send(!hook.is_null());
-            if hook.is_null() {
+            let installed = replace_mouse_hook(module);
+            let _ = ready_sender.send(installed);
+            if !installed {
                 return;
+            }
+            let foreground_hook = SetWinEventHook(
+                EVENT_SYSTEM_FOREGROUND,
+                EVENT_SYSTEM_FOREGROUND,
+                ptr::null_mut(),
+                Some(foreground_event_hook),
+                0,
+                0,
+                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+            );
+            if foreground_hook.is_null() {
+                crate::logging::error("监控前台窗口", "安装 WinEvent 钩子失败");
             }
             let mut message = MSG::default();
             while GetMessageW(&mut message, ptr::null_mut(), 0, 0) > 0 {}
-            UnhookWindowsHookEx(hook);
+            if !foreground_hook.is_null() {
+                UnhookWinEvent(foreground_hook);
+            }
+            let hook = MOUSE_HOOK.swap(ptr::null_mut(), Ordering::AcqRel) as HHOOK;
+            if !hook.is_null() {
+                UnhookWindowsHookEx(hook);
+            }
         })?;
 
     if ready_receiver.recv().unwrap_or(false) {
         Ok(())
     } else {
         bail!("安装全局鼠标钩子失败")
+    }
+}
+
+unsafe fn replace_mouse_hook(module: HINSTANCE) -> bool {
+    let replacement = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), module, 0) };
+    if replacement.is_null() {
+        return false;
+    }
+    let previous = MOUSE_HOOK.swap(replacement.cast(), Ordering::AcqRel) as HHOOK;
+    if !previous.is_null() {
+        unsafe {
+            UnhookWindowsHookEx(previous);
+        }
+    }
+    true
+}
+
+unsafe extern "system" fn foreground_event_hook(
+    _hook: HWINEVENTHOOK,
+    event: u32,
+    _hwnd: HWND,
+    _object_id: i32,
+    _child_id: i32,
+    _event_thread: u32,
+    _event_time: u32,
+) {
+    if event != EVENT_SYSTEM_FOREGROUND
+        || CONTEXT
+            .get()
+            .is_some_and(|context| context.candidate_present.load(Ordering::Acquire))
+    {
+        return;
+    }
+    let module = unsafe { GetModuleHandleW(ptr::null()) as HINSTANCE };
+    if !unsafe { replace_mouse_hook(module) } {
+        crate::logging::error("恢复鼠标钩子", "前台窗口切换后重新安装失败");
     }
 }
 
@@ -206,7 +265,10 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
     let message = wparam as u32;
     let event_button = trigger_for_event(message, event.mouseData);
     if is_trigger_up(message, event_button) && context.candidate_present.load(Ordering::Acquire) {
-        let mut state = context.state.lock().expect("hook state poisoned");
+        let Ok(mut state) = context.state.try_lock() else {
+            context.candidate_present.store(false, Ordering::Release);
+            return unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) };
+        };
         let Some(candidate) = state.candidate.take() else {
             context.candidate_present.store(false, Ordering::Release);
             return unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) };
@@ -249,7 +311,9 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
         if !context.candidate_present.load(Ordering::Acquire) {
             return unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) };
         }
-        let mut state = context.state.lock().expect("hook state poisoned");
+        let Ok(mut state) = context.state.try_lock() else {
+            return unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) };
+        };
         let Some(candidate) = state.candidate.as_mut() else {
             context.candidate_present.store(false, Ordering::Release);
             return unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) };
@@ -296,7 +360,9 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
         minimum_stroke_length_dip,
         guard,
     ) = {
-        let config = context.config.read().expect("config poisoned");
+        let Ok(config) = context.config.try_read() else {
+            return unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) };
+        };
         (
             config.enabled,
             config.trigger,
@@ -315,14 +381,16 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
 
     let point = event.pt;
     let target = target_window(point);
-    if target.is_null() || is_gesture_blocked(target, &guard) {
+    if target.is_null() || is_system_shell_surface(target) || is_gesture_blocked(target, &guard) {
         return unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) };
     }
     let dpi = unsafe { GetDpiForWindow(target) }.max(96);
     let activation_distance_px = activation_distance_dip * dpi as f32 / 96.0;
     let minimum_stroke_length_px = minimum_stroke_length_dip * dpi as f32 / 96.0;
     let now = Instant::now();
-    let mut state = context.state.lock().expect("hook state poisoned");
+    let Ok(mut state) = context.state.try_lock() else {
+        return unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) };
+    };
     if state.candidate.is_some() {
         return unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) };
     }
@@ -358,6 +426,28 @@ fn target_window(point: POINT) -> HWND {
     }
     let root = unsafe { GetAncestor(window, GA_ROOT) };
     if root.is_null() { window } else { root }
+}
+
+fn is_system_shell_surface(hwnd: HWND) -> bool {
+    let mut class_name = [0u16; 128];
+    let length = unsafe { GetClassNameW(hwnd, class_name.as_mut_ptr(), class_name.len() as i32) };
+    if length <= 0 {
+        return false;
+    }
+    let class_name = String::from_utf16_lossy(&class_name[..length as usize]);
+    is_system_shell_class(&class_name)
+}
+
+fn is_system_shell_class(class_name: &str) -> bool {
+    matches!(
+        class_name,
+        "Shell_TrayWnd"
+            | "Shell_SecondaryTrayWnd"
+            | "NotifyIconOverflowWindow"
+            | "TaskListThumbnailWnd"
+            | "Xaml_WindowedPopupClass"
+            | "#32768"
+    )
 }
 
 fn is_gesture_blocked(hwnd: HWND, guard: &GestureGuardConfig) -> bool {
@@ -516,7 +606,8 @@ fn gesture_committed(
 #[cfg(test)]
 mod tests {
     use super::{
-        GesturePoint, RECT, UiPoint, gesture_committed, rect_covers_monitor, stroke_ui_points,
+        GesturePoint, RECT, UiPoint, gesture_committed, is_system_shell_class, rect_covers_monitor,
+        stroke_ui_points,
     };
 
     #[test]
@@ -596,5 +687,22 @@ mod tests {
             monitor,
             8,
         ));
+    }
+
+    #[test]
+    fn taskbar_and_system_popup_classes_never_start_gestures() {
+        for class_name in [
+            "Shell_TrayWnd",
+            "Shell_SecondaryTrayWnd",
+            "NotifyIconOverflowWindow",
+            "TaskListThumbnailWnd",
+            "Xaml_WindowedPopupClass",
+            "#32768",
+        ] {
+            assert!(is_system_shell_class(class_name), "{class_name}");
+        }
+        for class_name in ["Chrome_WidgetWin_1", "Notepad", "CabinetWClass", "WorkerW"] {
+            assert!(!is_system_shell_class(class_name), "{class_name}");
+        }
     }
 }

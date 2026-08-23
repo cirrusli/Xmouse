@@ -46,7 +46,11 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Generate coverage report
-        run: cargo llvm-cov --features ci-bundled-sqlite --lcov --output-path coverage.lcov --fail-under-lines 10
+        run: cargo llvm-cov --features ci-bundled-sqlite --lcov --output-path coverage.lcov --fail-under-lines 24
+
+      - name: Publish coverage summary
+        shell: pwsh
+        run: ./scripts/summarize-lcov.ps1 -Path coverage.lcov
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4

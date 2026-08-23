@@ -49,7 +49,7 @@ try {
     }
 
     if ($Coverage) {
-        & $cargo llvm-cov --summary-only --fail-under-lines 10
+        & $cargo llvm-cov --summary-only --fail-under-lines 24
         if ($LASTEXITCODE -ne 0) {
             throw 'Coverage failed. Install cargo-llvm-cov and the llvm-tools-preview Rust component.'
         }

@@ -60,6 +60,8 @@ flowchart LR
 
 行覆盖率只衡量可执行 Rust 路径，不能证明低级钩子、DWM 合成、任务栏类名、焦点和 UIPI 行为正确；这些能力保留真实 Windows 必测项。下一轮优先把触发状态机、动作后端和历史 ViewModel 从 Win32 消息过程抽出，提高可测性，而不是为提高数字执行窗口 API。
 
+键盘动作通过 `MapVirtualKeyW(MAPVK_VK_TO_VSC_EX)` 转换为硬件扫描码；扩展键同时设置 `KEYEVENTF_EXTENDEDKEY`，键盘事件的 `dwExtraInfo` 保持为零。鼠标重放仍使用独立事件标记防止再次进入 `WH_MOUSE_LL`。`Ctrl` 组合键按“修饰键按下 → 普通键按下 → 普通键释放 → 修饰键释放”的顺序分次发送并保留短暂按压时间，以兼容 Flutter 等维护自身硬件键状态的桌面框架。
+
 ## 个性化手势数据流
 
 用户在设置页画布中用左键绘制单笔轨迹。UI 只收集坐标；`gesture.rs` 将轨迹重采样为 64 点并归一化，再以 `UserGestureTemplate` 保存到版本化配置。每个动作最多保留 3 份个人样本，超限时替换最早一份。

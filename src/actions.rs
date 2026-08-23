@@ -3,7 +3,7 @@ use crate::{
     clipboard::ClipboardService,
     config::AppConfig,
     gesture::{Recognizer, UserGestureTemplate},
-    hook::{HookCommand, INJECTED_EVENT_TOKEN, WM_APP_SHOW_HISTORY, WM_APP_TOAST, replay_button},
+    hook::{HookCommand, WM_APP_SHOW_HISTORY, WM_APP_TOAST, replay_button},
     logging,
 };
 use anyhow::{Context, Result, bail};
@@ -28,10 +28,10 @@ use windows_sys::Win32::{
     System::DataExchange::GetClipboardSequenceNumber,
     UI::{
         Input::KeyboardAndMouse::{
-            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
-            VK_BROWSER_BACK, VK_BROWSER_FORWARD, VK_CONTROL, VK_ESCAPE, VK_LEFT, VK_LWIN,
-            VK_MEDIA_PLAY_PAUSE, VK_RIGHT, VK_SHIFT, VK_TAB, VK_VOLUME_DOWN, VK_VOLUME_MUTE,
-            VK_VOLUME_UP,
+            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
+            KEYEVENTF_SCANCODE, MAPVK_VK_TO_VSC_EX, MapVirtualKeyW, SendInput, VK_BROWSER_BACK,
+            VK_BROWSER_FORWARD, VK_CONTROL, VK_ESCAPE, VK_LEFT, VK_LWIN, VK_MEDIA_PLAY_PAUSE,
+            VK_RIGHT, VK_SHIFT, VK_TAB, VK_VOLUME_DOWN, VK_VOLUME_MUTE, VK_VOLUME_UP,
         },
         Shell::ShellExecuteW,
         WindowsAndMessaging::{
@@ -246,23 +246,42 @@ fn activate_target(target: HWND) -> Result<()> {
 }
 
 fn send_ctrl_key(key: u16) -> Result<()> {
-    let mut inputs = [
+    let mut inputs = ctrl_key_inputs(key);
+    let delays_ms = [8, 24, 8];
+    for (index, input) in inputs.iter_mut().enumerate() {
+        let sent = unsafe { SendInput(1, input, std::mem::size_of::<INPUT>() as i32) };
+        if sent != 1 {
+            best_effort_release_ctrl_chord(key);
+            bail!("SendInput 被系统或目标程序拒绝");
+        }
+        if let Some(delay_ms) = delays_ms.get(index) {
+            thread::sleep(Duration::from_millis(*delay_ms));
+        }
+    }
+    Ok(())
+}
+
+fn ctrl_key_inputs(key: u16) -> [INPUT; 4] {
+    [
         keyboard_input(VK_CONTROL, 0),
         keyboard_input(key, 0),
         keyboard_input(key, KEYEVENTF_KEYUP),
         keyboard_input(VK_CONTROL, KEYEVENTF_KEYUP),
+    ]
+}
+
+fn best_effort_release_ctrl_chord(key: u16) {
+    let mut releases = [
+        keyboard_input(key, KEYEVENTF_KEYUP),
+        keyboard_input(VK_CONTROL, KEYEVENTF_KEYUP),
     ];
-    let sent = unsafe {
+    unsafe {
         SendInput(
-            inputs.len() as u32,
-            inputs.as_mut_ptr(),
+            releases.len() as u32,
+            releases.as_mut_ptr(),
             std::mem::size_of::<INPUT>() as i32,
-        )
-    };
-    if sent != inputs.len() as u32 {
-        bail!("SendInput 被系统或目标程序拒绝");
+        );
     }
-    Ok(())
 }
 
 pub fn paste_into_target(target_hwnd: isize) -> Result<()> {
@@ -371,15 +390,33 @@ fn send_virtual_desktop_switch(direction: u16) -> Result<()> {
 }
 
 fn keyboard_input(key: u16, flags: u32) -> INPUT {
+    let mapped_scan = unsafe { MapVirtualKeyW(key as u32, MAPVK_VK_TO_VSC_EX) };
+    let (virtual_key, scan_code, scan_flags) = if mapped_scan == 0 {
+        (key, 0, 0)
+    } else {
+        let extended = if mapped_scan & 0xFF00 != 0 {
+            KEYEVENTF_EXTENDEDKEY
+        } else {
+            0
+        };
+        (
+            0,
+            (mapped_scan & 0xFF) as u16,
+            KEYEVENTF_SCANCODE | extended,
+        )
+    };
     INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
-                wVk: key,
-                wScan: 0,
-                dwFlags: flags,
+                wVk: virtual_key,
+                wScan: scan_code,
+                dwFlags: flags | scan_flags,
                 time: 0,
-                dwExtraInfo: INJECTED_EVENT_TOKEN,
+                // Keyboard events never enter Xmouse's mouse-only hook. Leaving
+                // extra info at zero makes the sequence match physical input
+                // more closely for Flutter and other framework key handlers.
+                dwExtraInfo: 0,
             },
         },
     }
@@ -487,4 +524,43 @@ pub fn post_toast(ui_hwnd: isize, text: &str) {
 
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ctrl_key_inputs, keyboard_input};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, VK_LWIN,
+    };
+
+    #[test]
+    fn keyboard_shortcuts_use_unmarked_hardware_scan_codes() {
+        let letter = keyboard_input(b'W' as u16, 0);
+        let letter = unsafe { letter.Anonymous.ki };
+        assert_eq!(letter.wVk, 0);
+        assert_ne!(letter.wScan, 0);
+        assert_ne!(letter.dwFlags & KEYEVENTF_SCANCODE, 0);
+        assert_eq!(letter.dwExtraInfo, 0);
+
+        let windows_key = keyboard_input(VK_LWIN, KEYEVENTF_KEYUP);
+        let windows_key = unsafe { windows_key.Anonymous.ki };
+        assert_ne!(windows_key.dwFlags & KEYEVENTF_SCANCODE, 0);
+        assert_ne!(windows_key.dwFlags & KEYEVENTF_EXTENDEDKEY, 0);
+        assert_ne!(windows_key.dwFlags & KEYEVENTF_KEYUP, 0);
+        assert_eq!(windows_key.dwExtraInfo, 0);
+    }
+
+    #[test]
+    fn ctrl_chord_keeps_modifier_pressed_until_the_key_is_released() {
+        let inputs = ctrl_key_inputs(b'W' as u16);
+        let keys = inputs.map(|input| unsafe { input.Anonymous.ki });
+
+        assert_eq!(keys[0].wScan, keys[3].wScan);
+        assert_eq!(keys[1].wScan, keys[2].wScan);
+        assert_ne!(keys[0].wScan, keys[1].wScan);
+        assert_eq!(keys[0].dwFlags & KEYEVENTF_KEYUP, 0);
+        assert_eq!(keys[1].dwFlags & KEYEVENTF_KEYUP, 0);
+        assert_ne!(keys[2].dwFlags & KEYEVENTF_KEYUP, 0);
+        assert_ne!(keys[3].dwFlags & KEYEVENTF_KEYUP, 0);
+    }
 }

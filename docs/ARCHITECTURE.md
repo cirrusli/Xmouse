@@ -15,6 +15,7 @@ flowchart LR
     Clipboard --> Storage["storage.rs · SQLite/媒体"]
     Hook --> Gesture["gesture.rs · 轨迹识别"]
     App --> Config["config.rs · 配置"]
+    App --> Autostart["autostart.rs · 管理员自启"]
     App --> Resources["resources.rs · 按需资源采样"]
 ```
 
@@ -36,6 +37,7 @@ flowchart LR
 | `gesture.rs` | 轨迹 ID、模板、个人样本归一化和识别 | 具体动作执行 |
 | `action.rs` | 有限安全动作枚举与用户文案 | `SendInput`、窗口句柄和 UI 状态 |
 | `actions.rs` | 轨迹绑定解析后的目标验证与动作执行 | 手势形状识别和任意脚本 |
+| `autostart.rs` | 提权助手、最高权限登录任务和旧启动项迁移 | UI 状态、手势与剪贴板业务 |
 
 依赖方向保持为 `app → ui/domain services`。纯绘制函数通过参数接收主题、字体和视图数据，不读取 `AppState`；这样可以独立调整页面而不影响钩子与存储线程。
 
@@ -56,9 +58,11 @@ flowchart LR
 
 应用保护规则只保存和匹配 EXE 文件名，大小写无关。命中指定进程或通用全屏规则后，触发按下事件直接交给 Windows，不创建候选轨迹。名单不会提升 Xmouse 权限；中等完整性进程在高完整性、受保护进程和 UAC 安全桌面中仍遵循 UIPI，并只要求安全失败。
 
+管理员自启不使用 `requireAdministrator` 应用清单。设置保存时，`app.rs` 仅在开关变化或计划任务缺失时调用 `autostart.rs`；后者通过 Shell `runas` 启动同一可执行文件的一次性助手，并在单实例检查前处理内部参数。助手生成 UTF-16 任务 XML，再使用 `schtasks.exe` 创建当前用户 `ONLOGON + HIGHEST + InteractiveToken` 任务，动作固定为当前便携版路径和 `--startup`；XML 同时明确允许电池供电启动/运行并忽略重复实例。父进程等待助手退出，UAC 取消或任务失败时不保存新设置。正常启动只查询任务是否存在，不自动弹出 UAC；升级成功后清理旧版 `HKCU Run` 值。
+
 ## 持续质量边界
 
-`docs/REGRESSION-TEST-PLAN.md` 是用户可见行为的稳定索引。每个修复或新功能先选择回归编号，再决定自动化或真实 Windows 验证；`scripts/verify-test-baseline.ps1` 防止测试数量静默减少，`scripts/quality.ps1` 统一格式、Clippy、Release 测试和可选剪贴板/覆盖率检查。GitHub Actions 使用 MSVC 和仅限 CI 的 bundled SQLite 特性生成 LCOV，普通便携版仍使用随包分发的 `sqlite3.dll`，不增加应用体积。
+`docs/REGRESSION-TEST-PLAN.md` 是用户可见行为的稳定索引。每个修复或新功能先选择回归编号，再决定自动化或真实 Windows 验证；`scripts/verify-test-baseline.ps1` 防止测试数量静默减少，`scripts/quality.ps1` 统一格式、Clippy、Release 测试、最终可执行文件构建和可选剪贴板/覆盖率检查。显式构建步骤避免测试 Harness 已更新但交付 EXE 仍陈旧。GitHub Actions 使用 MSVC 和仅限 CI 的 bundled SQLite 特性生成 LCOV，普通便携版仍使用随包分发的 `sqlite3.dll`，不增加应用体积。
 
 行覆盖率只衡量可执行 Rust 路径，不能证明低级钩子、DWM 合成、任务栏类名、焦点和 UIPI 行为正确；这些能力保留真实 Windows 必测项。下一轮优先把触发状态机、动作后端和历史 ViewModel 从 Win32 消息过程抽出，提高可测性，而不是为提高数字执行窗口 API。
 

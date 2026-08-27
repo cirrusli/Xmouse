@@ -247,7 +247,7 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
     general_page.push(controls.enabled);
     controls.autostart = builder.control(
         "BUTTON",
-        "开机自动启动",
+        "开机管理员启动",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
         0,
         530,

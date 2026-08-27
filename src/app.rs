@@ -1,6 +1,7 @@
 use crate::{
     action::ActionKind,
     actions::{paste_into_target, post_toast, run_worker},
+    autostart,
     clipboard::{ClipboardService, process_name},
     config::{self, AppConfig, GestureGuardConfig, TriggerButton},
     gesture::{GestureId, GestureMatch, Point as GesturePoint, Recognizer, UserGestureTemplate},
@@ -59,10 +60,6 @@ use windows_sys::Win32::{
         Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize},
         DataExchange::{AddClipboardFormatListener, RemoveClipboardFormatListener},
         LibraryLoader::GetModuleHandleW,
-        Registry::{
-            HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
-            RegCreateKeyExW, RegDeleteValueW, RegSetValueExW,
-        },
         Threading::CreateMutexW,
     },
     UI::{
@@ -200,10 +197,12 @@ pub fn run() -> Result<()> {
     let loaded = config::load_or_create();
     let mut load_warning = loaded.as_ref().err().map(|error| format!("{error:#}"));
     let config_value = loaded.unwrap_or_default();
-    if config_value.autostart
-        && let Err(error) = set_autostart(true)
-    {
-        load_warning = Some(format!("开机自启修复失败：{error:#}"));
+    if config_value.autostart && !autostart::is_task_registered() {
+        let warning = "管理员开机启动尚未配置，请在常规页保存一次设置";
+        load_warning = Some(match load_warning {
+            Some(existing) => format!("{existing}；{warning}"),
+            None => warning.to_string(),
+        });
     }
     let dark_mode = config_value.dark_mode;
     let pending_gesture_guard = config_value.gesture_guard.clone();
@@ -763,8 +762,11 @@ unsafe extern "system" fn main_proc(
                     IDC_TRIGGER_X2 => select_trigger(state, TriggerButton::X2),
                     IDC_SAVE => match read_config_from_controls(state) {
                         Ok(config) => {
-                            if let Err(error) = config::save(&state.config_path, &config)
-                                .and_then(|_| set_autostart(config.autostart))
+                            let was_autostart_enabled =
+                                state.config.read().expect("config poisoned").autostart;
+                            if let Err(error) =
+                                autostart::apply_setting(config.autostart, was_autostart_enabled)
+                                    .and_then(|_| config::save(&state.config_path, &config))
                             {
                                 logging::error("保存设置", &error);
                                 post_toast(hwnd as isize, &format!("保存失败：{error:#}"));
@@ -3352,53 +3354,6 @@ fn redraw_control_without_erase(control: HWND) {
         InvalidateRect(control, ptr::null(), 0);
         UpdateWindow(control);
     }
-}
-
-fn set_autostart(enabled: bool) -> Result<()> {
-    let key_path = wide("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
-    let value_name = wide("Xmouse");
-    let mut key: HKEY = ptr::null_mut();
-    let result = unsafe {
-        RegCreateKeyExW(
-            HKEY_CURRENT_USER,
-            key_path.as_ptr(),
-            0,
-            ptr::null_mut(),
-            REG_OPTION_NON_VOLATILE,
-            KEY_SET_VALUE,
-            ptr::null(),
-            &mut key,
-            ptr::null_mut(),
-        )
-    };
-    if result != 0 {
-        bail!("无法打开开机启动注册表项（错误 {result}）");
-    }
-    let operation_result = if enabled {
-        let executable = std::env::current_exe()?;
-        let quoted = format!("\"{}\" --background", executable.display());
-        let bytes: Vec<u16> = quoted.encode_utf16().chain(Some(0)).collect();
-        unsafe {
-            RegSetValueExW(
-                key,
-                value_name.as_ptr(),
-                0,
-                REG_SZ,
-                bytes.as_ptr() as *const u8,
-                (bytes.len() * 2) as u32,
-            )
-        }
-    } else {
-        let result = unsafe { RegDeleteValueW(key, value_name.as_ptr()) };
-        if result == 2 { 0 } else { result }
-    };
-    unsafe {
-        RegCloseKey(key);
-    }
-    if operation_result != 0 {
-        bail!("更新开机启动失败（错误 {operation_result}）");
-    }
-    Ok(())
 }
 
 fn window_text(hwnd: HWND) -> String {

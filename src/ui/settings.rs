@@ -34,6 +34,9 @@ pub const IDC_NAV_ABOUT: i32 = 1033;
 pub const IDC_OPEN_GITHUB: i32 = 1034;
 pub const IDC_DISABLE_FULLSCREEN_GESTURES: i32 = 1037;
 pub const IDC_HISTORY_AUTO_PASTE: i32 = 1038;
+pub const IDC_NAV_APPLICATIONS: i32 = 1042;
+pub const IDC_GUARD_ADD_APP: i32 = 1043;
+pub const IDC_GUARD_REMOVE_APP: i32 = 1044;
 
 const SS_RIGHT_STYLE: u32 = 2;
 
@@ -42,6 +45,7 @@ pub enum SettingsPage {
     General,
     History,
     Gestures,
+    Applications,
     Resources,
     About,
 }
@@ -61,11 +65,14 @@ pub struct Controls {
     pub nav_general: HWND,
     pub nav_history: HWND,
     pub nav_gestures: HWND,
+    pub nav_applications: HWND,
     pub nav_resources: HWND,
     pub nav_about: HWND,
     pub enabled: HWND,
     pub dark_mode: HWND,
     pub disable_fullscreen_gestures: HWND,
+    pub gesture_guard_target: HWND,
+    pub gesture_guard_summary: HWND,
     pub trigger_right: HWND,
     pub trigger_x1: HWND,
     pub trigger_x2: HWND,
@@ -84,6 +91,7 @@ pub struct Controls {
     pub general_page: Vec<HWND>,
     pub history_page: Vec<HWND>,
     pub gestures_page: Vec<HWND>,
+    pub applications_page: Vec<HWND>,
     pub resources_page: Vec<HWND>,
     pub about_page: Vec<HWND>,
 }
@@ -98,11 +106,14 @@ impl Default for Controls {
             nav_general: ptr::null_mut(),
             nav_history: ptr::null_mut(),
             nav_gestures: ptr::null_mut(),
+            nav_applications: ptr::null_mut(),
             nav_resources: ptr::null_mut(),
             nav_about: ptr::null_mut(),
             enabled: ptr::null_mut(),
             dark_mode: ptr::null_mut(),
             disable_fullscreen_gestures: ptr::null_mut(),
+            gesture_guard_target: ptr::null_mut(),
+            gesture_guard_summary: ptr::null_mut(),
             trigger_right: ptr::null_mut(),
             trigger_x1: ptr::null_mut(),
             trigger_x2: ptr::null_mut(),
@@ -121,6 +132,7 @@ impl Default for Controls {
             general_page: Vec::new(),
             history_page: Vec::new(),
             gestures_page: Vec::new(),
+            applications_page: Vec::new(),
             resources_page: Vec::new(),
             about_page: Vec::new(),
         }
@@ -163,13 +175,24 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
         42,
         IDC_NAV_GESTURES,
     );
+    controls.nav_applications = builder.control(
+        "BUTTON",
+        "应用保护",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        0,
+        14,
+        254,
+        162,
+        42,
+        IDC_NAV_APPLICATIONS,
+    );
     controls.nav_resources = builder.control(
         "BUTTON",
         "资源占用",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
         0,
         14,
-        254,
+        304,
         162,
         42,
         IDC_NAV_RESOURCES,
@@ -180,7 +203,7 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
         0,
         14,
-        304,
+        354,
         162,
         42,
         IDC_NAV_ABOUT,
@@ -203,6 +226,7 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
     let mut general_page = Vec::new();
     let mut history_page = Vec::new();
     let mut gestures_page = Vec::new();
+    let mut applications_page = Vec::new();
     let mut resources_page = Vec::new();
     let mut about_page = Vec::new();
 
@@ -245,19 +269,6 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
         IDC_DARK_MODE,
     );
     general_page.push(controls.dark_mode);
-    controls.disable_fullscreen_gestures = builder.control(
-        "BUTTON",
-        "全屏应用中暂停手势",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
-        0,
-        530,
-        194,
-        270,
-        34,
-        IDC_DISABLE_FULLSCREEN_GESTURES,
-    );
-    general_page.push(controls.disable_fullscreen_gestures);
-
     let trigger_title = builder.label("触发键", 232, 276, 220, 26);
     set_control_font(trigger_title, fonts.section);
     general_page.push(trigger_title);
@@ -417,6 +428,62 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
     controls.gesture = gesture_settings::create_controls(hwnd, fonts.body, fonts.section);
     gestures_page.extend(controls.gesture.page.iter().copied());
 
+    let fullscreen_title = builder.label("全屏保护", 232, 116, 180, 26);
+    set_control_font(fullscreen_title, fonts.section);
+    applications_page.push(fullscreen_title);
+    controls.disable_fullscreen_gestures = builder.control(
+        "BUTTON",
+        "所有全屏窗口暂停手势",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        0,
+        232,
+        154,
+        330,
+        34,
+        IDC_DISABLE_FULLSCREEN_GESTURES,
+    );
+    applications_page.push(controls.disable_fullscreen_gestures);
+    applications_page.push(builder.label("关闭后可只依靠下方应用名单保护游戏", 232, 200, 460, 22));
+
+    let applications_title = builder.label("指定应用", 232, 292, 180, 26);
+    set_control_font(applications_title, fonts.section);
+    applications_page.push(applications_title);
+    controls.gesture_guard_target = builder.label("当前应用：未获取", 232, 334, 580, 24);
+    applications_page.push(controls.gesture_guard_target);
+    let add_application = builder.control(
+        "BUTTON",
+        "禁用当前应用",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        0,
+        232,
+        378,
+        148,
+        40,
+        IDC_GUARD_ADD_APP,
+    );
+    applications_page.push(add_application);
+    let remove_application = builder.control(
+        "BUTTON",
+        "移除应用",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        0,
+        392,
+        378,
+        128,
+        40,
+        IDC_GUARD_REMOVE_APP,
+    );
+    applications_page.push(remove_application);
+    controls.gesture_guard_summary = builder.label("尚未指定应用", 232, 448, 580, 74);
+    applications_page.push(controls.gesture_guard_summary);
+    applications_page.push(builder.label(
+        "先切换到目标窗口，再从托盘打开 Xmouse 设置",
+        232,
+        546,
+        520,
+        22,
+    ));
+
     let cpu_title = builder.label("CPU", 232, 124, 120, 24);
     resources_page.push(cpu_title);
     controls.resource_cpu = builder.label("0.00%", 232, 154, 250, 44);
@@ -530,6 +597,7 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
     controls.general_page = general_page;
     controls.history_page = history_page;
     controls.gestures_page = gestures_page;
+    controls.applications_page = applications_page;
     controls.resources_page = resources_page;
     controls.about_page = about_page;
     controls

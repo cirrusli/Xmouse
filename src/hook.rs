@@ -9,7 +9,7 @@ use std::{
     ptr,
     sync::{
         Arc, Mutex, OnceLock, RwLock,
-        atomic::{AtomicBool, AtomicIsize, AtomicPtr, Ordering},
+        atomic::{AtomicBool, AtomicIsize, AtomicPtr, AtomicU32, Ordering},
         mpsc::{self, Sender},
     },
     thread,
@@ -18,7 +18,7 @@ use std::{
 use windows_sys::Win32::{
     Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
     Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow},
-    System::LibraryLoader::GetModuleHandleW,
+    System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentProcessId},
     UI::{
         Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent},
         HiDpi::GetDpiForWindow,
@@ -104,6 +104,9 @@ struct HookContext {
 
 static CONTEXT: OnceLock<HookContext> = OnceLock::new();
 static MOUSE_HOOK: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+static LAST_EXTERNAL_FOREGROUND: AtomicIsize = AtomicIsize::new(0);
+static LAST_EXTERNAL_PROCESS_ID: AtomicU32 = AtomicU32::new(0);
+static LAST_EXTERNAL_IS_EXCLUDED: AtomicBool = AtomicBool::new(false);
 
 pub fn start(
     config: Arc<RwLock<AppConfig>>,
@@ -124,6 +127,7 @@ pub fn start(
     thread::Builder::new()
         .name("xmouse-hook".to_owned())
         .spawn(move || unsafe {
+            remember_external_foreground(GetForegroundWindow());
             let module = GetModuleHandleW(ptr::null()) as HINSTANCE;
             let installed = replace_mouse_hook(module);
             let _ = ready_sender.send(installed);
@@ -177,16 +181,19 @@ unsafe fn replace_mouse_hook(module: HINSTANCE) -> bool {
 unsafe extern "system" fn foreground_event_hook(
     _hook: HWINEVENTHOOK,
     event: u32,
-    _hwnd: HWND,
+    hwnd: HWND,
     _object_id: i32,
     _child_id: i32,
     _event_thread: u32,
     _event_time: u32,
 ) {
-    if event != EVENT_SYSTEM_FOREGROUND
-        || CONTEXT
-            .get()
-            .is_some_and(|context| context.candidate_present.load(Ordering::Acquire))
+    if event != EVENT_SYSTEM_FOREGROUND {
+        return;
+    }
+    remember_external_foreground(hwnd);
+    if CONTEXT
+        .get()
+        .is_some_and(|context| context.candidate_present.load(Ordering::Acquire))
     {
         return;
     }
@@ -194,6 +201,44 @@ unsafe extern "system" fn foreground_event_hook(
     if !unsafe { replace_mouse_hook(module) } {
         crate::logging::error("恢复鼠标钩子", "前台窗口切换后重新安装失败");
     }
+}
+
+pub fn last_external_foreground() -> isize {
+    LAST_EXTERNAL_FOREGROUND.load(Ordering::Acquire)
+}
+
+fn remember_external_foreground(hwnd: HWND) {
+    if hwnd.is_null() {
+        return;
+    }
+    let root = unsafe { GetAncestor(hwnd, GA_ROOT) };
+    let root = if root.is_null() { hwnd } else { root };
+    let mut process_id = 0;
+    unsafe {
+        GetWindowThreadProcessId(root, &mut process_id);
+    }
+    if process_id == 0
+        || process_id == unsafe { GetCurrentProcessId() }
+        || is_system_shell_surface(root)
+    {
+        return;
+    }
+    LAST_EXTERNAL_FOREGROUND.store(root as isize, Ordering::Release);
+    LAST_EXTERNAL_PROCESS_ID.store(process_id, Ordering::Release);
+    let excluded = CONTEXT
+        .get()
+        .and_then(|context| context.config.try_read().ok())
+        .and_then(|config| {
+            process_name(process_id).map(|name| {
+                config
+                    .gesture_guard
+                    .excluded_processes
+                    .iter()
+                    .any(|item| item.eq_ignore_ascii_case(&name))
+            })
+        })
+        .unwrap_or(false);
+    LAST_EXTERNAL_IS_EXCLUDED.store(excluded, Ordering::Release);
 }
 
 pub fn update_ui_hwnd(hwnd: isize) {
@@ -462,6 +507,9 @@ fn is_process_excluded(hwnd: HWND, excluded_processes: &[String]) -> bool {
     let mut process_id = 0;
     unsafe {
         GetWindowThreadProcessId(hwnd, &mut process_id);
+    }
+    if process_id == LAST_EXTERNAL_PROCESS_ID.load(Ordering::Acquire) {
+        return LAST_EXTERNAL_IS_EXCLUDED.load(Ordering::Acquire);
     }
     let Some(name) = process_name(process_id) else {
         return false;

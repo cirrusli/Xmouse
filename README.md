@@ -2,7 +2,7 @@
 
 Xmouse 是面向 Windows 10/11 x64 的轻量鼠标手势与剪贴板历史工具。它使用 Rust 和原生 Win32 API，不包含 WebView 或托管 UI 运行时。
 
-当前版本：**0.13.3**
+当前版本：**0.14.0**
 
 作者：[cirrusli](https://github.com/cirrusli) · 项目地址：[github.com/cirrusli/Xmouse](https://github.com/cirrusli/Xmouse)
 
@@ -10,7 +10,7 @@ Xmouse 是面向 Windows 10/11 x64 的轻量鼠标手势与剪贴板历史工具
 
 双击根目录的 `启动 Xmouse.cmd`。脚本会从 `latest\Xmouse.exe` 启动当前最新版。
 
-便携版也可以直接解压 `outputs\Xmouse-0.13.3-windows-x64.zip` 后运行 `Xmouse.exe`。请保留 `sqlite3.dll` 与程序在同一目录。
+便携版也可以直接解压 `outputs\Xmouse-0.14.0-windows-x64.zip` 后运行 `Xmouse.exe`。请保留 `sqlite3.dll` 与程序在同一目录。
 
 ## 目录结构
 
@@ -31,7 +31,7 @@ Xmouse 是面向 Windows 10/11 x64 的轻量鼠标手势与剪贴板历史工具
 - 产品需求、技术选型与后续路线：`docs\PRODUCT-REQUIREMENTS-AND-ROADMAP.md`
 - 工程架构与模块边界：`docs\ARCHITECTURE.md`
 - 持续回归清单与变更影响映射：`docs\REGRESSION-TEST-PLAN.md`
-- 当前版本说明：`docs\RELEASE-NOTES-0.13.3.md`
+- 当前版本说明：`docs\RELEASE-NOTES-0.14.0.md`
 - 完整版本历史：`CHANGELOG.md`
 
 ## 默认手势
@@ -50,7 +50,9 @@ Xmouse 是面向 Windows 10/11 x64 的轻量鼠标手势与剪贴板历史工具
 
 右键是默认触发键，也可以在设置中改为 X1/X2 侧键。普通短按会被重放，仍可使用正常右键菜单；轨迹过短时也按普通单击处理，不再弹出“手势太快”提示。
 
-默认开启“全屏应用中暂停手势”：当前台窗口覆盖整个显示器时，Xmouse 不拦截触发键。全屏和无边框全屏游戏可直接使用原始鼠标输入；普通最大化窗口不会被误判。
+“应用保护”页支持两层规则：默认对覆盖整块显示器的全屏窗口暂停手势，也可以把最近活跃窗口对应的 EXE 加入禁用名单。关闭全屏总开关后可只保护指定游戏；规则命中时 Xmouse 完全放行原始鼠标输入。
+
+提升权限或受保护的窗口仍受 Windows UIPI 限制。把应用加入禁用名单只能确保鼠标不被 Xmouse 拦截，并不能让中等权限的 Xmouse 在该窗口内获得跨权限手势能力。
 
 ## 界面
 
@@ -96,6 +98,6 @@ cargo build --release
 
 每次变更建议运行 `scripts\quality.ps1`；剪贴板相关变更运行 `scripts\quality.ps1 -ClipboardRoundTrip`。GitHub Actions 还会检查测试数量、Clippy、Release 测试并生成覆盖率报告。完整必测项见 `docs\REGRESSION-TEST-PLAN.md`。
 
-Release 可执行文件位于 `target\release\xmouse.exe`。当前版本说明见 `docs\RELEASE-NOTES-0.13.3.md`，完整变更历史见 `CHANGELOG.md`。
+Release 可执行文件位于 `target\release\xmouse.exe`。当前版本说明见 `docs\RELEASE-NOTES-0.14.0.md`，完整变更历史见 `CHANGELOG.md`。
 
 首次启动会打开设置页并创建托盘图标。关闭设置页只会隐藏窗口；需要从托盘菜单选择“退出 Xmouse”结束进程。

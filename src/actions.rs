@@ -1,6 +1,6 @@
 use crate::{
     action::ActionKind,
-    clipboard::ClipboardService,
+    clipboard::{ClipboardService, process_name},
     config::AppConfig,
     gesture::{Recognizer, UserGestureTemplate},
     hook::{HookCommand, WM_APP_SHOW_HISTORY, WM_APP_TOAST, replay_button},
@@ -35,10 +35,11 @@ use windows_sys::Win32::{
         },
         Shell::ShellExecuteW,
         WindowsAndMessaging::{
-            GA_ROOT, GWL_EXSTYLE, GetAncestor, GetForegroundWindow, GetWindowLongPtrW,
-            HWND_NOTOPMOST, HWND_TOPMOST, IsWindow, IsZoomed, PostMessageW, SW_MAXIMIZE,
-            SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE,
-            SWP_NOSIZE, SetForegroundWindow, SetWindowPos, ShowWindow, WS_EX_TOPMOST,
+            GA_ROOT, GA_ROOTOWNER, GWL_EXSTYLE, GetAncestor, GetForegroundWindow,
+            GetWindowLongPtrW, GetWindowThreadProcessId, HWND_NOTOPMOST, HWND_TOPMOST, IsWindow,
+            IsZoomed, PostMessageW, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL,
+            SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow,
+            SetWindowPos, ShowWindow, WM_CLOSE, WS_EX_TOPMOST,
         },
     },
 };
@@ -105,12 +106,7 @@ fn execute_action(
     match action {
         ActionKind::Disabled => Ok(()),
         ActionKind::ToggleTopmost => toggle_topmost(target, ui_hwnd),
-        ActionKind::CloseTab => {
-            activate_target(target)?;
-            send_ctrl_key(b'W' as u16)?;
-            post_toast(ui_hwnd, "已发送 Ctrl+W");
-            Ok(())
-        }
+        ActionKind::CloseTab => close_tab_or_compatible_window(target, ui_hwnd),
         ActionKind::CopySelection => {
             activate_target(target)?;
             send_ctrl_key(b'C' as u16)?;
@@ -224,25 +220,107 @@ fn activate_target(target: HWND) -> Result<()> {
         bail!("目标窗口已经关闭");
     }
     let foreground = unsafe { GetForegroundWindow() };
-    let foreground_root = if foreground.is_null() {
-        foreground
-    } else {
-        unsafe { GetAncestor(foreground, GA_ROOT) }
-    };
-    if foreground_root != target && unsafe { SetForegroundWindow(target) } == 0 {
-        bail!("Windows 阻止了目标窗口激活");
+    if windows_share_input_target(target, foreground) {
+        return Ok(());
     }
-    thread::sleep(Duration::from_millis(30));
+
+    // SetForegroundWindow may report failure while a foreground transition is
+    // already in flight. Verify the actual foreground window for a short,
+    // bounded period instead of treating the return value as the final state.
+    let activation_requested = unsafe { SetForegroundWindow(target) } != 0;
+    let deadline = Instant::now() + Duration::from_millis(150);
+    while Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+        let foreground = unsafe { GetForegroundWindow() };
+        if windows_share_input_target(target, foreground) {
+            return Ok(());
+        }
+    }
+
+    let target_process = window_process_id(target).unwrap_or_default();
     let foreground = unsafe { GetForegroundWindow() };
-    let foreground_root = if foreground.is_null() {
-        foreground
-    } else {
-        unsafe { GetAncestor(foreground, GA_ROOT) }
-    };
-    if foreground_root != target {
-        bail!("目标窗口未获得焦点");
+    let foreground_process = window_process_id(foreground).unwrap_or_default();
+    if activation_requested {
+        bail!("目标窗口未获得焦点（目标 PID {target_process}，前台 PID {foreground_process}）");
     }
+    bail!("Windows 阻止了目标窗口激活（目标 PID {target_process}，前台 PID {foreground_process}）")
+}
+
+fn close_tab_or_compatible_window(target: HWND, ui_hwnd: isize) -> Result<()> {
+    if target.is_null() || unsafe { IsWindow(target) } == 0 {
+        bail!("目标窗口已经关闭");
+    }
+    if let Some(close_target) = wallpaper_ui_close_target(target) {
+        if unsafe { PostMessageW(close_target, WM_CLOSE, 0, 0) } == 0 {
+            bail!("Wallpaper UI 拒绝了关闭请求");
+        }
+        post_toast(ui_hwnd, "已关闭 Wallpaper UI");
+        return Ok(());
+    }
+
+    activate_target(target)?;
+    send_ctrl_key(b'W' as u16)?;
+    post_toast(ui_hwnd, "已发送 Ctrl+W");
     Ok(())
+}
+
+fn wallpaper_ui_close_target(target: HWND) -> Option<HWND> {
+    let candidates = [
+        window_ancestor_or_self(target, GA_ROOTOWNER),
+        window_ancestor_or_self(target, GA_ROOT),
+        target,
+    ];
+    candidates.into_iter().find(|candidate| {
+        window_process_id(*candidate)
+            .and_then(process_name)
+            .is_some_and(|name| is_wallpaper_ui_process_name(&name))
+    })
+}
+
+fn is_wallpaper_ui_process_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("wallpaperui.exe")
+}
+
+fn windows_share_input_target(target: HWND, foreground: HWND) -> bool {
+    if target.is_null() || foreground.is_null() {
+        return false;
+    }
+    if target == foreground {
+        return true;
+    }
+
+    let target_root = window_ancestor_or_self(target, GA_ROOT);
+    let foreground_root = window_ancestor_or_self(foreground, GA_ROOT);
+    if target_root == foreground_root {
+        return true;
+    }
+
+    let target_owner = window_ancestor_or_self(target, GA_ROOTOWNER);
+    let foreground_owner = window_ancestor_or_self(foreground, GA_ROOTOWNER);
+    if target_owner == foreground_owner {
+        return true;
+    }
+
+    matches!(
+        (window_process_id(target_root), window_process_id(foreground_root)),
+        (Some(target_process), Some(foreground_process)) if target_process == foreground_process
+    )
+}
+
+fn window_ancestor_or_self(window: HWND, flag: u32) -> HWND {
+    let ancestor = unsafe { GetAncestor(window, flag) };
+    if ancestor.is_null() { window } else { ancestor }
+}
+
+fn window_process_id(window: HWND) -> Option<u32> {
+    if window.is_null() {
+        return None;
+    }
+    let mut process_id = 0;
+    unsafe {
+        GetWindowThreadProcessId(window, &mut process_id);
+    }
+    (process_id != 0).then_some(process_id)
 }
 
 fn send_ctrl_key(key: u16) -> Result<()> {
@@ -528,7 +606,9 @@ fn wide(value: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ctrl_key_inputs, keyboard_input};
+    use super::{
+        ctrl_key_inputs, is_wallpaper_ui_process_name, keyboard_input, windows_share_input_target,
+    };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, VK_LWIN,
     };
@@ -562,5 +642,21 @@ mod tests {
         assert_eq!(keys[1].dwFlags & KEYEVENTF_KEYUP, 0);
         assert_ne!(keys[2].dwFlags & KEYEVENTF_KEYUP, 0);
         assert_ne!(keys[3].dwFlags & KEYEVENTF_KEYUP, 0);
+    }
+
+    #[test]
+    fn null_windows_never_share_an_input_target() {
+        assert!(!windows_share_input_target(
+            std::ptr::null_mut(),
+            std::ptr::null_mut()
+        ));
+    }
+
+    #[test]
+    fn wallpaper_ui_compatibility_rule_is_process_specific() {
+        assert!(is_wallpaper_ui_process_name("wallpaperui.exe"));
+        assert!(is_wallpaper_ui_process_name("WallpaperUI.EXE"));
+        assert!(!is_wallpaper_ui_process_name("wallpaper64.exe"));
+        assert!(!is_wallpaper_ui_process_name("msedge.exe"));
     }
 }

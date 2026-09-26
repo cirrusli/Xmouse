@@ -29,6 +29,10 @@ pub fn error(context: &str, error: impl Display) {
     write_line("ERROR", context, error);
 }
 
+pub fn info(context: &str, message: impl Display) {
+    write_line("INFO", context, message);
+}
+
 fn write_line(level: &str, context: &str, message: impl Display) {
     let Some(path) = LOG_PATH.get() else {
         return;

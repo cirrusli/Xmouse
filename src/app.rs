@@ -34,7 +34,7 @@ use std::{
     ptr,
     sync::{
         Arc, RwLock,
-        atomic::{AtomicBool, AtomicPtr, Ordering},
+        atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering},
         mpsc::{self, Sender},
     },
     thread,
@@ -60,7 +60,7 @@ use windows_sys::Win32::{
         Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize},
         DataExchange::{AddClipboardFormatListener, RemoveClipboardFormatListener},
         LibraryLoader::GetModuleHandleW,
-        Threading::CreateMutexW,
+        Threading::{CreateMutexW, GetCurrentProcessId},
     },
     UI::{
         Controls::{
@@ -73,7 +73,7 @@ use windows_sys::Win32::{
             TrackMouseEvent, VK_DELETE, VK_ESCAPE, VK_RETURN,
         },
         Shell::{
-            NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
+            NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
             Shell_NotifyIconW, ShellExecuteW,
         },
         WindowsAndMessaging::{
@@ -88,9 +88,9 @@ use windows_sys::Win32::{
             LoadCursorW, LoadIconW, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK,
             MB_YESNO, MENUINFO, MENUITEMINFOW, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING,
             MFT_OWNERDRAW, MIIM_DATA, MIIM_FTYPE, MIM_BACKGROUND, MSG, MessageBoxW,
-            PostQuitMessage, RegisterClassExW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-            SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE,
-            SWP_NOACTIVATE, SWP_SHOWWINDOW, SendMessageW, SetForegroundWindow,
+            PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SM_CXVIRTUALSCREEN,
+            SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_RESTORE, SW_SHOW,
+            SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SendMessageW, SetForegroundWindow,
             SetLayeredWindowAttributes, SetMenuInfo, SetMenuItemInfoW, SetTimer, SetWindowLongPtrW,
             SetWindowPos, SetWindowTextW, ShowWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
             TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WA_INACTIVE,
@@ -120,8 +120,12 @@ const IDM_HISTORY_SOURCE_BASE: usize = 3000;
 const IDM_GESTURE_ACTION_BASE: usize = 4000;
 const IDM_GESTURE_EXCLUSION_BASE: usize = 5000;
 const RESOURCE_TIMER_ID: usize = 2;
+const TRAY_RETRY_TIMER_ID: usize = 3;
+const TRAY_RETRY_LIMIT: u8 = 60;
+const TRAY_RETRY_DELAY_MS: u32 = 1_000;
 const WM_APP_HISTORY_PREVIEW_READY: u32 = 0x8008;
 static APP_STATE: AtomicPtr<AppState> = AtomicPtr::new(ptr::null_mut());
+static TASKBAR_CREATED_MESSAGE: AtomicU32 = AtomicU32::new(0);
 static DARK_HISTORY_MENU_ACTIVE: AtomicBool = AtomicBool::new(false);
 static DARK_HISTORY_MENU_FONT: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
@@ -170,6 +174,7 @@ struct AppState {
     history_source_filter: Option<String>,
     history_origin: isize,
     tray_added: bool,
+    tray_retry_count: u8,
     font_body: HFONT,
     font_section: HFONT,
     font_title: HFONT,
@@ -211,11 +216,34 @@ pub fn run() -> Result<()> {
     let config = Arc::new(RwLock::new(config_value));
     let root = config::app_data_dir()?;
     logging::init(&root)?;
+    std::panic::set_hook(Box::new(|panic_info| {
+        let location = panic_info
+            .location()
+            .map(|location| format!("{}:{}", location.file(), location.line()))
+            .unwrap_or_else(|| "未知位置".to_owned());
+        logging::error("未处理异常", location);
+    }));
+    logging::info(
+        "进程",
+        format!("启动 PID={}，后台={start_in_background}", unsafe {
+            GetCurrentProcessId()
+        }),
+    );
     let storage = Storage::open(root, config.clone())?;
     let clipboard = ClipboardService::new(storage.clone(), config.clone());
     let (capture_sender, capture_receiver) = mpsc::channel();
     let (preview_sender, preview_receiver) = mpsc::channel();
 
+    let taskbar_created = unsafe { RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()) };
+    if taskbar_created == 0 {
+        logging::error(
+            "托盘图标",
+            format!("注册 TaskbarCreated 消息失败，错误 {}", unsafe {
+                GetLastError()
+            }),
+        );
+    }
+    TASKBAR_CREATED_MESSAGE.store(taskbar_created, Ordering::Release);
     register_classes()?;
     initialize_common_controls();
     let font_body = create_ui_font(-16, FW_NORMAL as i32);
@@ -266,6 +294,7 @@ pub fn run() -> Result<()> {
         history_source_filter: None,
         history_origin: 0,
         tray_added: false,
+        tray_retry_count: 0,
         font_body,
         font_section,
         font_title,
@@ -421,6 +450,7 @@ pub fn run() -> Result<()> {
     }
 
     message_loop();
+    logging::info("进程", "主消息循环已结束");
 
     APP_STATE.store(ptr::null_mut(), Ordering::Release);
     unsafe {
@@ -635,7 +665,17 @@ fn color_static_control(parent: HWND, control: HWND, hdc: *mut c_void) -> LRESUL
 
 fn message_loop() {
     let mut message = MSG::default();
-    while unsafe { GetMessageW(&mut message, ptr::null_mut(), 0, 0) } > 0 {
+    loop {
+        let result = unsafe { GetMessageW(&mut message, ptr::null_mut(), 0, 0) };
+        if result <= 0 {
+            if result < 0 {
+                logging::error(
+                    "主消息循环",
+                    format!("GetMessageW 失败，错误 {}", unsafe { GetLastError() }),
+                );
+            }
+            break;
+        }
         if pretranslate_history(&message) {
             continue;
         }
@@ -704,6 +744,16 @@ unsafe extern "system" fn main_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    let taskbar_created = TASKBAR_CREATED_MESSAGE.load(Ordering::Acquire);
+    if taskbar_created != 0 && message == taskbar_created {
+        if let Some(state) = state_mut() {
+            logging::info("托盘图标", "收到 TaskbarCreated，重新注册");
+            state.tray_added = false;
+            state.tray_retry_count = 0;
+            add_tray_icon(state);
+        }
+        return 0;
+    }
     match message {
         WM_CREATE => {
             if let Some(state) = state_mut() {
@@ -1044,6 +1094,13 @@ unsafe extern "system" fn main_proc(
             }
             0
         }
+        WM_TIMER if wparam == TRAY_RETRY_TIMER_ID => {
+            unsafe { KillTimer(hwnd, TRAY_RETRY_TIMER_ID) };
+            if let Some(state) = state_mut() {
+                add_tray_icon(state);
+            }
+            0
+        }
         WM_CLOSE => {
             unsafe {
                 ShowWindow(hwnd, SW_HIDE);
@@ -1051,6 +1108,7 @@ unsafe extern "system" fn main_proc(
             0
         }
         WM_DESTROY => {
+            logging::info("进程", "主窗口销毁");
             if let Some(state) = state_mut() {
                 unsafe {
                     RemoveClipboardFormatListener(hwnd);
@@ -3245,6 +3303,9 @@ fn show_toast(state: &mut AppState) {
 }
 
 fn add_tray_icon(state: &mut AppState) {
+    if state.tray_added {
+        return;
+    }
     let mut data = tray_data(state.main_hwnd);
     data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     data.uCallbackMessage = WM_APP_TRAY;
@@ -3253,10 +3314,45 @@ fn add_tray_icon(state: &mut AppState) {
     copy_wide_fixed(&mut data.szTip, "Xmouse");
     if unsafe { Shell_NotifyIconW(NIM_ADD, &data) } != 0 {
         state.tray_added = true;
+        state.tray_retry_count = 0;
+        unsafe { KillTimer(state.main_hwnd, TRAY_RETRY_TIMER_ID) };
+        logging::info("托盘图标", "注册成功");
+    } else if unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) } != 0 {
+        // TaskbarCreated is also broadcast on some DPI changes, when the
+        // existing icon may still be registered rather than missing.
+        state.tray_added = true;
+        state.tray_retry_count = 0;
+        unsafe { KillTimer(state.main_hwnd, TRAY_RETRY_TIMER_ID) };
+        logging::info("托盘图标", "图标已存在，更新成功");
+    } else {
+        state.tray_retry_count = state.tray_retry_count.saturating_add(1);
+        if state.tray_retry_count == 1 || state.tray_retry_count == TRAY_RETRY_LIMIT {
+            logging::error(
+                "托盘图标",
+                format!(
+                    "注册失败，第 {} 次，Windows 错误 {}",
+                    state.tray_retry_count,
+                    unsafe { GetLastError() }
+                ),
+            );
+        }
+        if state.tray_retry_count < TRAY_RETRY_LIMIT
+            && unsafe {
+                SetTimer(
+                    state.main_hwnd,
+                    TRAY_RETRY_TIMER_ID,
+                    TRAY_RETRY_DELAY_MS,
+                    None,
+                )
+            } == 0
+        {
+            logging::error("托盘图标", "创建重试计时器失败");
+        }
     }
 }
 
 fn remove_tray_icon(state: &mut AppState) {
+    unsafe { KillTimer(state.main_hwnd, TRAY_RETRY_TIMER_ID) };
     if state.tray_added {
         let data = tray_data(state.main_hwnd);
         unsafe {

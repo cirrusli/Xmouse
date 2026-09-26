@@ -29,10 +29,10 @@ use windows_sys::Win32::{
         WindowsAndMessaging::{
             CallNextHookEx, EVENT_SYSTEM_FOREGROUND, GA_ROOT, GetAncestor, GetClassNameW,
             GetForegroundWindow, GetMessageW, GetShellWindow, GetWindowRect,
-            GetWindowThreadProcessId, HHOOK, IsIconic, IsZoomed, MSG, MSLLHOOKSTRUCT, PostMessageW,
-            SetWindowsHookExW, UnhookWindowsHookEx, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT,
-            WINEVENT_SKIPOWNPROCESS, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_XBUTTONDOWN,
-            WM_XBUTTONUP, WindowFromPoint,
+            GetWindowThreadProcessId, HHOOK, IsIconic, IsZoomed, KillTimer, MSG, MSLLHOOKSTRUCT,
+            PostMessageW, SetTimer, SetWindowsHookExW, UnhookWindowsHookEx, WH_MOUSE_LL,
+            WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_MOUSEMOVE, WM_RBUTTONDOWN,
+            WM_RBUTTONUP, WM_TIMER, WM_XBUTTONDOWN, WM_XBUTTONUP, WindowFromPoint,
         },
     },
 };
@@ -48,6 +48,7 @@ pub const WM_APP_CAPTURE_DONE: u32 = 0x8007;
 pub const INJECTED_EVENT_TOKEN: usize = 0x4743_4C49_505F_0001;
 const XBUTTON1_VALUE: u16 = 0x0001;
 const XBUTTON2_VALUE: u16 = 0x0002;
+const HOOK_REFRESH_INTERVAL_MS: u32 = 30_000;
 
 #[derive(Debug)]
 pub struct StrokeRequest {
@@ -134,6 +135,7 @@ pub fn start(
             if !installed {
                 return;
             }
+            crate::logging::info("鼠标钩子", "已安装");
             let foreground_hook = SetWinEventHook(
                 EVENT_SYSTEM_FOREGROUND,
                 EVENT_SYSTEM_FOREGROUND,
@@ -146,8 +148,37 @@ pub fn start(
             if foreground_hook.is_null() {
                 crate::logging::error("监控前台窗口", "安装 WinEvent 钩子失败");
             }
+            // A low-level hook can be silently removed after a callback timeout.
+            // A thread timer gives it a bounded recovery time even when the
+            // foreground window does not change. Never refresh mid-stroke.
+            let refresh_timer = SetTimer(ptr::null_mut(), 0, HOOK_REFRESH_INTERVAL_MS, None);
+            if refresh_timer == 0 {
+                crate::logging::error("鼠标钩子", "创建恢复计时器失败");
+            }
             let mut message = MSG::default();
-            while GetMessageW(&mut message, ptr::null_mut(), 0, 0) > 0 {}
+            loop {
+                let result = GetMessageW(&mut message, ptr::null_mut(), 0, 0);
+                if result <= 0 {
+                    if result < 0 {
+                        crate::logging::error("鼠标钩子", "消息循环读取失败");
+                    }
+                    break;
+                }
+                if refresh_timer != 0
+                    && message.hwnd.is_null()
+                    && message.message == WM_TIMER
+                    && message.wParam == refresh_timer
+                    && !CONTEXT
+                        .get()
+                        .is_some_and(|context| context.candidate_present.load(Ordering::Acquire))
+                    && !replace_mouse_hook(module)
+                {
+                    crate::logging::error("鼠标钩子", "定时恢复失败");
+                }
+            }
+            if refresh_timer != 0 {
+                KillTimer(ptr::null_mut(), refresh_timer);
+            }
             if !foreground_hook.is_null() {
                 UnhookWinEvent(foreground_hook);
             }
@@ -170,10 +201,8 @@ unsafe fn replace_mouse_hook(module: HINSTANCE) -> bool {
         return false;
     }
     let previous = MOUSE_HOOK.swap(replacement.cast(), Ordering::AcqRel) as HHOOK;
-    if !previous.is_null() {
-        unsafe {
-            UnhookWindowsHookEx(previous);
-        }
+    if !previous.is_null() && unsafe { UnhookWindowsHookEx(previous) } == 0 {
+        crate::logging::info("鼠标钩子", "旧钩子句柄已失效，已安装替代钩子");
     }
     true
 }

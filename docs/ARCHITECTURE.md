@@ -52,7 +52,9 @@ flowchart LR
 
 线程间使用 Rust 通道和 `WM_APP_*` 消息。UI 句柄只在 UI 线程操作；共享配置使用 `Arc<RwLock<AppConfig>>`。
 
-钩子线程同时注册进程外 `EVENT_SYSTEM_FOREGROUND` WinEvent。前台切换且当前没有正在绘制的轨迹时，线程先安装新的 `WH_MOUSE_LL`，再原子替换并卸载旧句柄；这样可以恢复被 Windows 静默移除或在高完整性窗口期间受隔离的钩子。WinEvent 还记录最近活跃的非 Xmouse 顶层窗口及其进程规则命中状态，供“应用保护”页选择目标，并让常见的前台触发只做原子 PID/布尔值比较。后台窗口首次命中才按需查询进程名。此机制不使用心跳输入、定时器或空闲轮询。钩子热路径对配置和轨迹状态只尝试非阻塞锁，竞争时直接放行原始输入。
+钩子线程同时注册进程外 `EVENT_SYSTEM_FOREGROUND` WinEvent。前台切换且当前没有正在绘制的轨迹时，线程先安装新的 `WH_MOUSE_LL`，再原子替换并卸载旧句柄；这样可以恢复被 Windows 静默移除或在高完整性窗口期间受隔离的钩子。若前台一直不变，钩子线程使用 30 秒低频消息计时器重装一次，绘制中跳过。WinEvent 还记录最近活跃的非 Xmouse 顶层窗口及其进程规则命中状态，供“应用保护”页选择目标，并让常见的前台触发只做原子 PID/布尔值比较。后台窗口首次命中才按需查询进程名。不存在模拟心跳输入或高频空闲轮询；钩子热路径对配置和轨迹状态只尝试非阻塞锁，竞争时直接放行原始输入。
+
+托盘图标在 `WM_CREATE` 初次注册，若 Explorer 尚未就绪则每秒重试，最多 60 次；收到系统的 `TaskbarCreated` 广播时重新注册。广播也可能由 DPI 变化产生，因此 `NIM_ADD` 失败时再尝试 `NIM_MODIFY`。注册结果和进程生命周期写入不含剪贴板正文的本地日志。
 
 命中 `Shell_TrayWnd`、`Shell_SecondaryTrayWnd`、`NotifyIconOverflowWindow`、`TaskListThumbnailWnd`、`Xaml_WindowedPopupClass` 或 `#32768` 的右键直接交由 Windows，避免任务栏、托盘和系统菜单进入手势状态机。
 

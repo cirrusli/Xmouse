@@ -18,7 +18,7 @@ foreach ($sourceFile in $sourceFiles) {
     $ignoredTests += $ignored
 }
 
-$minimumRegularTests = 49
+$minimumRegularTests = 51
 $minimumIgnoredTests = 1
 if ($regularTests -lt $minimumRegularTests) {
     throw "Regular Rust test count regressed: $regularTests found, minimum is $minimumRegularTests."

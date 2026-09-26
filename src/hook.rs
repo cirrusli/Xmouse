@@ -29,10 +29,10 @@ use windows_sys::Win32::{
         WindowsAndMessaging::{
             CallNextHookEx, EVENT_SYSTEM_FOREGROUND, GA_ROOT, GetAncestor, GetClassNameW,
             GetForegroundWindow, GetMessageW, GetShellWindow, GetWindowRect,
-            GetWindowThreadProcessId, HHOOK, IsIconic, IsZoomed, KillTimer, MSG, MSLLHOOKSTRUCT,
-            PostMessageW, SetTimer, SetWindowsHookExW, UnhookWindowsHookEx, WH_MOUSE_LL,
-            WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_MOUSEMOVE, WM_RBUTTONDOWN,
-            WM_RBUTTONUP, WM_TIMER, WM_XBUTTONDOWN, WM_XBUTTONUP, WindowFromPoint,
+            GetWindowThreadProcessId, HHOOK, IsIconic, IsZoomed, KillTimer, LLMHF_INJECTED, MSG,
+            MSLLHOOKSTRUCT, PostMessageW, SetTimer, SetWindowsHookExW, UnhookWindowsHookEx,
+            WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_MOUSEMOVE,
+            WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER, WM_XBUTTONDOWN, WM_XBUTTONUP, WindowFromPoint,
         },
     },
 };
@@ -332,7 +332,12 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
         return unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) };
     };
     let event = unsafe { &*(lparam as *const MSLLHOOKSTRUCT) };
-    if event.dwExtraInfo == INJECTED_EVENT_TOKEN {
+    // Injected clicks must not start another candidate. Matching only our
+    // dwExtraInfo token proved insufficient on Windows: replayed right clicks
+    // could recursively trigger another replay until Xmouse was stopped.
+    // Pass injected input through to its target, but never treat it as a
+    // physical gesture.
+    if should_ignore_mouse_event(event.flags, event.dwExtraInfo) {
         return unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) };
     }
 
@@ -680,12 +685,28 @@ fn gesture_committed(
     path_length >= minimum_stroke_length && max_distance >= activation_distance * 1.5
 }
 
+fn should_ignore_mouse_event(flags: u32, extra_info: usize) -> bool {
+    flags & LLMHF_INJECTED != 0 || extra_info == INJECTED_EVENT_TOKEN
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        GesturePoint, RECT, UiPoint, gesture_committed, is_system_shell_class, rect_covers_monitor,
-        stroke_ui_points,
+        GesturePoint, INJECTED_EVENT_TOKEN, RECT, UiPoint, gesture_committed,
+        is_system_shell_class, rect_covers_monitor, should_ignore_mouse_event, stroke_ui_points,
     };
+    use windows_sys::Win32::UI::WindowsAndMessaging::LLMHF_INJECTED;
+
+    #[test]
+    fn injected_mouse_events_never_reenter_gesture_recognition() {
+        assert!(should_ignore_mouse_event(LLMHF_INJECTED, 0));
+        assert!(should_ignore_mouse_event(
+            LLMHF_INJECTED,
+            INJECTED_EVENT_TOKEN
+        ));
+        assert!(should_ignore_mouse_event(0, INJECTED_EVENT_TOKEN));
+        assert!(!should_ignore_mouse_event(0, 0));
+    }
 
     #[test]
     fn short_or_jittery_drag_is_not_committed() {

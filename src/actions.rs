@@ -30,8 +30,9 @@ use windows_sys::Win32::{
         Input::KeyboardAndMouse::{
             INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
             KEYEVENTF_SCANCODE, MAPVK_VK_TO_VSC_EX, MapVirtualKeyW, SendInput, VK_BROWSER_BACK,
-            VK_BROWSER_FORWARD, VK_CONTROL, VK_ESCAPE, VK_LEFT, VK_LWIN, VK_MEDIA_PLAY_PAUSE,
-            VK_RIGHT, VK_SHIFT, VK_TAB, VK_VOLUME_DOWN, VK_VOLUME_MUTE, VK_VOLUME_UP,
+            VK_BROWSER_FORWARD, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_LWIN,
+            VK_MEDIA_PLAY_PAUSE, VK_RIGHT, VK_SHIFT, VK_TAB, VK_UP, VK_VOLUME_DOWN, VK_VOLUME_MUTE,
+            VK_VOLUME_UP,
         },
         Shell::ShellExecuteW,
         WindowsAndMessaging::{
@@ -63,8 +64,15 @@ pub fn run_worker(
             while let Ok(command) = receiver.recv() {
                 let result = match command {
                     HookCommand::Replay(button) => replay_button(button),
-                    HookCommand::Cancelled => Ok(()),
+                    HookCommand::Cancelled => {
+                        logging::info("手势识别", "达到拖动长度但未激活");
+                        Ok(())
+                    }
                     HookCommand::Stroke(stroke) => {
+                        logging::info(
+                            "手势识别",
+                            format!("开始处理 {} 个采样点", stroke.points.len()),
+                        );
                         let (threshold, user_templates) = {
                             let config = config.read().expect("config poisoned");
                             (config.recognition_threshold, config.custom_gestures.clone())
@@ -74,14 +82,21 @@ pub fn run_worker(
                             loaded_user_templates = user_templates;
                         }
                         let Some(matched) = recognizer.recognize(&stroke.points, threshold) else {
+                            logging::info("手势识别", "未匹配到可靠手势");
                             post_toast(ui_hwnd, "未识别手势");
                             continue;
                         };
-                        let _recognition_score = matched.score;
                         let action = config
                             .read()
                             .expect("config poisoned")
                             .action_for(matched.gesture);
+                        logging::info(
+                            "手势识别",
+                            format!(
+                                "轨迹={:?}，动作={action:?}，得分={:.3}",
+                                matched.gesture, matched.score
+                            ),
+                        );
                         execute_action(action, stroke.target_hwnd, &config, &clipboard, ui_hwnd)
                     }
                 };
@@ -446,25 +461,28 @@ fn send_inputs(inputs: &mut [INPUT], error_message: &str) -> Result<()> {
 }
 
 fn send_virtual_desktop_switch(direction: u16) -> Result<()> {
-    let mut inputs = [
+    let mut inputs = desktop_switch_inputs(direction);
+    send_inputs(&mut inputs, "切换桌面的快捷键被系统拒绝")?;
+    logging::info(
+        "桌面切换",
+        if direction == VK_LEFT {
+            "已注入向左快捷键"
+        } else {
+            "已注入向右快捷键"
+        },
+    );
+    Ok(())
+}
+
+fn desktop_switch_inputs(direction: u16) -> [INPUT; 6] {
+    [
         keyboard_input(VK_LWIN, 0),
         keyboard_input(VK_CONTROL, 0),
         keyboard_input(direction, 0),
         keyboard_input(direction, KEYEVENTF_KEYUP),
         keyboard_input(VK_CONTROL, KEYEVENTF_KEYUP),
         keyboard_input(VK_LWIN, KEYEVENTF_KEYUP),
-    ];
-    let sent = unsafe {
-        SendInput(
-            inputs.len() as u32,
-            inputs.as_mut_ptr(),
-            std::mem::size_of::<INPUT>() as i32,
-        )
-    };
-    if sent != inputs.len() as u32 {
-        bail!("切换桌面的快捷键被系统拒绝");
-    }
-    Ok(())
+    ]
 }
 
 fn keyboard_input(key: u16, flags: u32) -> INPUT {
@@ -472,11 +490,15 @@ fn keyboard_input(key: u16, flags: u32) -> INPUT {
     let (virtual_key, scan_code, scan_flags) = if mapped_scan == 0 {
         (key, 0, 0)
     } else {
-        let extended = if mapped_scan & 0xFF00 != 0 {
-            KEYEVENTF_EXTENDEDKEY
-        } else {
-            0
-        };
+        // Some keyboard layouts map VK_LEFT/RIGHT to the shared numpad scan
+        // codes (0x4B/0x4D) without an E0 prefix. The dedicated arrow keys
+        // still require KEYEVENTF_EXTENDEDKEY for shell shortcuts.
+        let extended =
+            if mapped_scan & 0xFF00 != 0 || matches!(key, VK_LEFT | VK_RIGHT | VK_UP | VK_DOWN) {
+                KEYEVENTF_EXTENDEDKEY
+            } else {
+                0
+            };
         (
             0,
             (mapped_scan & 0xFF) as u16,
@@ -607,10 +629,11 @@ fn wide(value: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ctrl_key_inputs, is_wallpaper_ui_process_name, keyboard_input, windows_share_input_target,
+        ctrl_key_inputs, desktop_switch_inputs, is_wallpaper_ui_process_name, keyboard_input,
+        windows_share_input_target,
     };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, VK_LWIN,
+        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, VK_LEFT, VK_LWIN, VK_RIGHT,
     };
 
     #[test]
@@ -642,6 +665,31 @@ mod tests {
         assert_eq!(keys[1].dwFlags & KEYEVENTF_KEYUP, 0);
         assert_ne!(keys[2].dwFlags & KEYEVENTF_KEYUP, 0);
         assert_ne!(keys[3].dwFlags & KEYEVENTF_KEYUP, 0);
+    }
+
+    #[test]
+    fn desktop_switch_uses_extended_arrows_with_modifiers_held() {
+        for direction in [VK_LEFT, VK_RIGHT] {
+            let keys = desktop_switch_inputs(direction).map(|input| unsafe { input.Anonymous.ki });
+            assert_eq!(keys[0].wScan, keys[5].wScan);
+            assert_eq!(keys[1].wScan, keys[4].wScan);
+            assert_eq!(keys[2].wScan, keys[3].wScan);
+            let expected_scan =
+                unsafe { super::MapVirtualKeyW(direction as u32, super::MAPVK_VK_TO_VSC_EX) };
+            assert_ne!(expected_scan, 0);
+            assert_eq!(keys[2].wScan, (expected_scan & 0xFF) as u16);
+            assert_ne!(keys[2].dwFlags & KEYEVENTF_SCANCODE, 0);
+            assert_ne!(keys[2].dwFlags & KEYEVENTF_EXTENDEDKEY, 0);
+            assert_ne!(keys[3].dwFlags & KEYEVENTF_EXTENDEDKEY, 0);
+            assert_eq!(keys[2].dwFlags & KEYEVENTF_KEYUP, 0);
+            assert_ne!(keys[3].dwFlags & KEYEVENTF_KEYUP, 0);
+            assert_eq!(keys[0].dwFlags & KEYEVENTF_KEYUP, 0);
+            assert_eq!(keys[1].dwFlags & KEYEVENTF_KEYUP, 0);
+            assert_ne!(keys[4].dwFlags & KEYEVENTF_KEYUP, 0);
+            assert_ne!(keys[5].dwFlags & KEYEVENTF_KEYUP, 0);
+            assert_eq!(keys[0].dwExtraInfo, 0);
+            assert_eq!(keys[1].dwExtraInfo, 0);
+        }
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 > 文档版本：2.2
 >
-> 产品基线：Xmouse 0.14.0
+> 产品需求基线：Xmouse 0.14.0；最新代码状态见 [代码现状与后续迭代](CURRENT-STATE-AND-ROADMAP.md)
 >
 > 下一目标版本：Xmouse 0.15.0
 >

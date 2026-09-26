@@ -53,6 +53,11 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Interactive clipboard round-trip test failed.' }
     }
 
+    # Tests produce a separate harness binary. Build the shipping executable
+    # explicitly so target/release/xmouse.exe can never remain stale.
+    & $cargo build --release
+    if ($LASTEXITCODE -ne 0) { throw 'cargo build --release failed.' }
+
     if ($Coverage) {
         & $cargo llvm-cov --summary-only --fail-under-lines 24
         if ($LASTEXITCODE -ne 0) {

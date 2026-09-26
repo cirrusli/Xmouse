@@ -80,6 +80,28 @@ impl Default for GestureGuardConfig {
     }
 }
 
+impl GestureGuardConfig {
+    pub fn add_excluded_process(&mut self, process_name: &str) -> bool {
+        let process_name = process_name.trim();
+        if process_name.is_empty()
+            || self
+                .excluded_processes
+                .iter()
+                .any(|item| item.eq_ignore_ascii_case(process_name))
+        {
+            return false;
+        }
+        self.excluded_processes.push(process_name.to_owned());
+        self.excluded_processes
+            .sort_by_key(|item| item.to_lowercase());
+        true
+    }
+
+    pub fn remove_excluded_process(&mut self, index: usize) -> Option<String> {
+        (index < self.excluded_processes.len()).then(|| self.excluded_processes.remove(index))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -383,6 +405,30 @@ mod tests {
 
         assert_eq!(config.gesture_guard.excluded_processes, ["game.exe"]);
         assert_eq!(config.history.excluded_processes, ["password-manager.exe"]);
+    }
+
+    #[test]
+    fn gesture_exclusions_are_case_insensitive_and_sorted() {
+        let mut guard = GestureGuardConfig::default();
+        assert!(guard.add_excluded_process("VALORANT.exe"));
+        assert!(guard.add_excluded_process("GTA5.exe"));
+        assert!(!guard.add_excluded_process("valorant.EXE"));
+        assert!(!guard.add_excluded_process("  "));
+        assert_eq!(guard.excluded_processes, ["GTA5.exe", "VALORANT.exe"]);
+    }
+
+    #[test]
+    fn gesture_exclusions_can_be_removed_by_menu_index() {
+        let mut guard = GestureGuardConfig {
+            excluded_processes: vec!["game-a.exe".to_owned(), "game-b.exe".to_owned()],
+            ..GestureGuardConfig::default()
+        };
+        assert_eq!(
+            guard.remove_excluded_process(0).as_deref(),
+            Some("game-a.exe")
+        );
+        assert_eq!(guard.excluded_processes, ["game-b.exe"]);
+        assert_eq!(guard.remove_excluded_process(8), None);
     }
 
     #[test]

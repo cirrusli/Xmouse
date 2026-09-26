@@ -1,15 +1,18 @@
 use crate::{
     action::ActionKind,
     actions::{paste_into_target, post_toast, run_worker},
-    clipboard::ClipboardService,
-    config::{self, AppConfig, TriggerButton},
+    autostart,
+    clipboard::{ClipboardService, process_name},
+    config::{self, AppConfig, GestureGuardConfig, TriggerButton},
     gesture::{GestureId, GestureMatch, Point as GesturePoint, Recognizer, UserGestureTemplate},
     hook::{
         self, HookCommand, UiPoint, UiStrokeBegin, WM_APP_CAPTURE_DONE, WM_APP_OVERLAY_BEGIN,
-        WM_APP_OVERLAY_END, WM_APP_OVERLAY_POINT, WM_APP_SHOW_HISTORY, WM_APP_TOAST, WM_APP_TRAY,
+        WM_APP_OVERLAY_END, WM_APP_OVERLAY_POINT, WM_APP_SHOW_HISTORY, WM_APP_STATS_UPDATED,
+        WM_APP_TOAST, WM_APP_TRAY,
     },
     logging,
     resources::{ProcessUsage, UsageSampler},
+    stats::{GestureStats, Period as StatsPeriod, Snapshot as StatsSnapshot},
     storage::{ClipKind, ClipPayload, Storage},
     ui::{
         format::{format_bytes, format_uptime},
@@ -19,6 +22,7 @@ use crate::{
         history_preview::PreviewImage,
         history_view::{HistoryView, draw_history_item as draw_history_row},
         settings::{self, Controls, Fonts as SettingsFonts, SettingsPage, *},
+        stats_view,
         theme::{
             ACCENT_COLOR, apply_child_theme, apply_window_theme, create_ui_font, palette, rgb,
         },
@@ -33,7 +37,7 @@ use std::{
     ptr,
     sync::{
         Arc, RwLock,
-        atomic::{AtomicBool, AtomicPtr, Ordering},
+        atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering},
         mpsc::{self, Sender},
     },
     thread,
@@ -59,11 +63,7 @@ use windows_sys::Win32::{
         Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize},
         DataExchange::{AddClipboardFormatListener, RemoveClipboardFormatListener},
         LibraryLoader::GetModuleHandleW,
-        Registry::{
-            HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
-            RegCreateKeyExW, RegDeleteValueW, RegSetValueExW,
-        },
-        Threading::CreateMutexW,
+        Threading::{CreateMutexW, GetCurrentProcessId},
     },
     UI::{
         Controls::{
@@ -76,30 +76,31 @@ use windows_sys::Win32::{
             TrackMouseEvent, VK_DELETE, VK_ESCAPE, VK_RETURN,
         },
         Shell::{
-            NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
+            NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
             Shell_NotifyIconW, ShellExecuteW,
         },
         WindowsAndMessaging::{
             AppendMenuW, CW_USEDEFAULT, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
             DestroyMenu, DestroyWindow, DispatchMessageW, EN_CHANGE, FindWindowW, GA_ROOT,
-            GW_OWNER, GWLP_USERDATA, GetAncestor, GetClientRect, GetCursorPos, GetForegroundWindow,
-            GetMessageW, GetSystemMetrics, GetWindow, GetWindowLongPtrW, GetWindowRect,
-            GetWindowTextLengthW, GetWindowTextW, HMENU, HTTRANSPARENT, HWND_TOPMOST, IDC_ARROW,
-            IDI_APPLICATION, IDYES, IsWindow, IsWindowVisible, KillTimer, LB_ADDSTRING,
-            LB_GETCURSEL, LB_ITEMFROMPOINT, LB_RESETCONTENT, LB_SETCURSEL, LBN_DBLCLK,
-            LBN_SELCHANGE, LWA_ALPHA, LWA_COLORKEY, LoadCursorW, LoadIconW, MB_ICONERROR,
-            MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO, MENUINFO, MENUITEMINFOW,
-            MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MFT_OWNERDRAW, MIIM_DATA, MIIM_FTYPE,
-            MIM_BACKGROUND, MSG, MessageBoxW, PostQuitMessage, RegisterClassExW,
-            SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE,
-            SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SendMessageW,
-            SetForegroundWindow, SetLayeredWindowAttributes, SetMenuInfo, SetMenuItemInfoW,
-            SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TPM_BOTTOMALIGN,
-            TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
-            WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CLIPBOARDUPDATE, WM_CLOSE,
-            WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC,
-            WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
-            WM_MEASUREITEM, WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_TIMER,
+            GW_OWNER, GWLP_USERDATA, GetAncestor, GetClientRect, GetCursorPos, GetDlgItem,
+            GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindow, GetWindowLongPtrW,
+            GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, HMENU,
+            HTTRANSPARENT, HWND_TOPMOST, IDC_ARROW, IDI_APPLICATION, IDYES, IsWindow,
+            IsWindowVisible, KillTimer, LB_ADDSTRING, LB_GETCURSEL, LB_ITEMFROMPOINT,
+            LB_RESETCONTENT, LB_SETCURSEL, LBN_DBLCLK, LBN_SELCHANGE, LWA_ALPHA, LWA_COLORKEY,
+            LoadCursorW, LoadIconW, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK,
+            MB_YESNO, MENUINFO, MENUITEMINFOW, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING,
+            MFT_OWNERDRAW, MIIM_DATA, MIIM_FTYPE, MIM_BACKGROUND, MSG, MessageBoxW,
+            PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SM_CXVIRTUALSCREEN,
+            SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_RESTORE, SW_SHOW,
+            SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SendMessageW, SetForegroundWindow,
+            SetLayeredWindowAttributes, SetMenuInfo, SetMenuItemInfoW, SetTimer, SetWindowLongPtrW,
+            SetWindowPos, SetWindowTextW, ShowWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
+            TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WA_INACTIVE,
+            WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CLIPBOARDUPDATE, WM_CLOSE, WM_COMMAND,
+            WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY,
+            WM_DRAWITEM, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MEASUREITEM,
+            WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_SHOWWINDOW, WM_TIMER,
             WNDCLASSEXW, WS_CAPTION, WS_CLIPCHILDREN, WS_EX_LAYERED, WS_EX_NOACTIVATE,
             WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MINIMIZEBOX, WS_OVERLAPPED,
             WS_POPUP, WS_SYSMENU,
@@ -121,9 +122,14 @@ const IDM_PAUSE: usize = 2003;
 const IDM_EXIT: usize = 2004;
 const IDM_HISTORY_SOURCE_BASE: usize = 3000;
 const IDM_GESTURE_ACTION_BASE: usize = 4000;
+const IDM_GESTURE_EXCLUSION_BASE: usize = 5000;
 const RESOURCE_TIMER_ID: usize = 2;
+const TRAY_RETRY_TIMER_ID: usize = 3;
+const TRAY_RETRY_LIMIT: u8 = 60;
+const TRAY_RETRY_DELAY_MS: u32 = 1_000;
 const WM_APP_HISTORY_PREVIEW_READY: u32 = 0x8008;
 static APP_STATE: AtomicPtr<AppState> = AtomicPtr::new(ptr::null_mut());
+static TASKBAR_CREATED_MESSAGE: AtomicU32 = AtomicU32::new(0);
 static DARK_HISTORY_MENU_ACTIVE: AtomicBool = AtomicBool::new(false);
 static DARK_HISTORY_MENU_FONT: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
@@ -157,6 +163,9 @@ struct AppState {
     config_path: PathBuf,
     clipboard: ClipboardService,
     storage: Storage,
+    stats: GestureStats,
+    stats_period: StatsPeriod,
+    stats_snapshot: StatsSnapshot,
     capture_sender: Sender<()>,
     controls: Controls,
     overlay_points: Vec<UiPoint>,
@@ -172,6 +181,7 @@ struct AppState {
     history_source_filter: Option<String>,
     history_origin: isize,
     tray_added: bool,
+    tray_retry_count: u8,
     font_body: HFONT,
     font_section: HFONT,
     font_title: HFONT,
@@ -182,6 +192,7 @@ struct AppState {
     usage_sampler: UsageSampler,
     usage: ProcessUsage,
     active_settings_page: SettingsPage,
+    pending_gesture_guard: GestureGuardConfig,
 }
 
 pub fn run() -> Result<()> {
@@ -198,22 +209,52 @@ pub fn run() -> Result<()> {
     let loaded = config::load_or_create();
     let mut load_warning = loaded.as_ref().err().map(|error| format!("{error:#}"));
     let config_value = loaded.unwrap_or_default();
-    if config_value.autostart
-        && let Err(error) = set_autostart(true)
-    {
-        load_warning = Some(format!("开机自启修复失败：{error:#}"));
+    if config_value.autostart && !autostart::is_task_registered() {
+        let warning = "管理员开机启动尚未配置，请在常规页保存一次设置";
+        load_warning = Some(match load_warning {
+            Some(existing) => format!("{existing}；{warning}"),
+            None => warning.to_string(),
+        });
     }
     let dark_mode = config_value.dark_mode;
+    let pending_gesture_guard = config_value.gesture_guard.clone();
     let mut gesture_recognizer = Recognizer::new();
     gesture_recognizer.set_user_templates(&config_value.custom_gestures);
     let config = Arc::new(RwLock::new(config_value));
     let root = config::app_data_dir()?;
     logging::init(&root)?;
+    std::panic::set_hook(Box::new(|panic_info| {
+        let location = panic_info
+            .location()
+            .map(|location| format!("{}:{}", location.file(), location.line()))
+            .unwrap_or_else(|| "未知位置".to_owned());
+        logging::error("未处理异常", location);
+    }));
+    logging::info(
+        "进程",
+        format!("启动 PID={}，后台={start_in_background}", unsafe {
+            GetCurrentProcessId()
+        }),
+    );
+    let stats = GestureStats::new(&root);
+    if let Err(error) = stats.initialize() {
+        logging::error("初始化手势统计", &error);
+    }
     let storage = Storage::open(root, config.clone())?;
     let clipboard = ClipboardService::new(storage.clone(), config.clone());
     let (capture_sender, capture_receiver) = mpsc::channel();
     let (preview_sender, preview_receiver) = mpsc::channel();
 
+    let taskbar_created = unsafe { RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()) };
+    if taskbar_created == 0 {
+        logging::error(
+            "托盘图标",
+            format!("注册 TaskbarCreated 消息失败，错误 {}", unsafe {
+                GetLastError()
+            }),
+        );
+    }
+    TASKBAR_CREATED_MESSAGE.store(taskbar_created, Ordering::Release);
     register_classes()?;
     initialize_common_controls();
     let font_body = create_ui_font(-16, FW_NORMAL as i32);
@@ -249,6 +290,9 @@ pub fn run() -> Result<()> {
         config_path,
         clipboard: clipboard.clone(),
         storage: storage.clone(),
+        stats: stats.clone(),
+        stats_period: StatsPeriod::Day,
+        stats_snapshot: StatsSnapshot::default(),
         capture_sender,
         controls: Controls::default(),
         overlay_points: Vec::with_capacity(512),
@@ -264,6 +308,7 @@ pub fn run() -> Result<()> {
         history_source_filter: None,
         history_origin: 0,
         tray_added: false,
+        tray_retry_count: 0,
         font_body,
         font_section,
         font_title,
@@ -274,6 +319,7 @@ pub fn run() -> Result<()> {
         usage_sampler: UsageSampler::new(),
         usage: ProcessUsage::default(),
         active_settings_page: SettingsPage::General,
+        pending_gesture_guard,
     });
     let state_pointer = Box::into_raw(state);
     APP_STATE.store(state_pointer, Ordering::Release);
@@ -379,6 +425,7 @@ pub fn run() -> Result<()> {
         command_receiver,
         unsafe { (*state_pointer).config.clone() },
         clipboard.clone(),
+        stats,
         main_hwnd as isize,
     );
     hook::start(
@@ -418,6 +465,7 @@ pub fn run() -> Result<()> {
     }
 
     message_loop();
+    logging::info("进程", "主消息循环已结束");
 
     APP_STATE.store(ptr::null_mut(), Ordering::Release);
     unsafe {
@@ -632,7 +680,17 @@ fn color_static_control(parent: HWND, control: HWND, hdc: *mut c_void) -> LRESUL
 
 fn message_loop() {
     let mut message = MSG::default();
-    while unsafe { GetMessageW(&mut message, ptr::null_mut(), 0, 0) } > 0 {
+    loop {
+        let result = unsafe { GetMessageW(&mut message, ptr::null_mut(), 0, 0) };
+        if result <= 0 {
+            if result < 0 {
+                logging::error(
+                    "主消息循环",
+                    format!("GetMessageW 失败，错误 {}", unsafe { GetLastError() }),
+                );
+            }
+            break;
+        }
         if pretranslate_history(&message) {
             continue;
         }
@@ -701,6 +759,16 @@ unsafe extern "system" fn main_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    let taskbar_created = TASKBAR_CREATED_MESSAGE.load(Ordering::Acquire);
+    if taskbar_created != 0 && message == taskbar_created {
+        if let Some(state) = state_mut() {
+            logging::info("托盘图标", "收到 TaskbarCreated，重新注册");
+            state.tray_added = false;
+            state.tray_retry_count = 0;
+            add_tray_icon(state);
+        }
+        return 0;
+    }
     match message {
         WM_CREATE => {
             if let Some(state) = state_mut() {
@@ -759,8 +827,11 @@ unsafe extern "system" fn main_proc(
                     IDC_TRIGGER_X2 => select_trigger(state, TriggerButton::X2),
                     IDC_SAVE => match read_config_from_controls(state) {
                         Ok(config) => {
-                            if let Err(error) = config::save(&state.config_path, &config)
-                                .and_then(|_| set_autostart(config.autostart))
+                            let was_autostart_enabled =
+                                state.config.read().expect("config poisoned").autostart;
+                            if let Err(error) =
+                                autostart::apply_setting(config.autostart, was_autostart_enabled)
+                                    .and_then(|_| config::save(&state.config_path, &config))
                             {
                                 logging::error("保存设置", &error);
                                 post_toast(hwnd as isize, &format!("保存失败：{error:#}"));
@@ -778,8 +849,15 @@ unsafe extern "system" fn main_proc(
                     IDC_NAV_GENERAL => show_settings_page(state, SettingsPage::General),
                     IDC_NAV_HISTORY => show_settings_page(state, SettingsPage::History),
                     IDC_NAV_GESTURES => show_settings_page(state, SettingsPage::Gestures),
+                    IDC_NAV_APPLICATIONS => show_settings_page(state, SettingsPage::Applications),
+                    IDC_NAV_STATISTICS => show_settings_page(state, SettingsPage::Statistics),
                     IDC_NAV_RESOURCES => show_settings_page(state, SettingsPage::Resources),
                     IDC_NAV_ABOUT => show_settings_page(state, SettingsPage::About),
+                    IDC_STATS_DAY => set_stats_period(state, StatsPeriod::Day),
+                    IDC_STATS_MONTH => set_stats_period(state, StatsPeriod::Month),
+                    IDC_STATS_YEAR => set_stats_period(state, StatsPeriod::Year),
+                    IDC_GUARD_ADD_APP => add_current_application_guard(state),
+                    IDC_GUARD_REMOVE_APP => show_application_guard_menu(state),
                     IDC_OPEN_GITHUB => open_github_profile(state),
                     IDC_GESTURE_UP => select_gesture_training_id(state, GestureId::Up),
                     IDC_GESTURE_L => select_gesture_training_id(state, GestureId::LetterL),
@@ -832,6 +910,23 @@ unsafe extern "system" fn main_proc(
         WM_APP_CAPTURE_DONE => {
             if let Some(state) = state_mut() {
                 refresh_history_usage(state);
+            }
+            0
+        }
+        WM_APP_STATS_UPDATED => {
+            if let Some(state) = state_mut()
+                && state.active_settings_page == SettingsPage::Statistics
+                && unsafe { IsWindowVisible(state.main_hwnd) } != 0
+            {
+                set_stats_period(state, state.stats_period);
+            }
+            0
+        }
+        WM_SHOWWINDOW if wparam != 0 => {
+            if let Some(state) = state_mut()
+                && state.active_settings_page == SettingsPage::Statistics
+            {
+                set_stats_period(state, state.stats_period);
             }
             0
         }
@@ -960,12 +1055,34 @@ unsafe extern "system" fn main_proc(
             }
             unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
+        WM_MEASUREITEM => {
+            let measure = unsafe { &mut *(lparam as *mut MEASUREITEMSTRUCT) };
+            let menu_font = DARK_HISTORY_MENU_FONT.load(Ordering::Acquire);
+            let handled = DARK_HISTORY_MENU_ACTIVE.load(Ordering::Acquire)
+                && !menu_font.is_null()
+                && widgets::measure_popup_menu_item(hwnd, measure, menu_font);
+            if handled {
+                1
+            } else {
+                unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+            }
+        }
         WM_DRAWITEM => {
             let draw = unsafe { &*(lparam as *const DRAWITEMSTRUCT) };
+            let menu_font = DARK_HISTORY_MENU_FONT.load(Ordering::Acquire);
+            if draw.CtlType == ODT_MENU
+                && DARK_HISTORY_MENU_ACTIVE.load(Ordering::Acquire)
+                && !menu_font.is_null()
+                && widgets::draw_popup_menu_item(draw, palette(true), menu_font)
+            {
+                return 1;
+            }
             match draw.CtlID as i32 {
                 IDC_SAVE | IDC_OPEN_HISTORY | IDC_CLEAR_HISTORY | IDC_STATUS | IDC_NAV_GENERAL
-                | IDC_NAV_HISTORY | IDC_NAV_GESTURES | IDC_NAV_RESOURCES | IDC_NAV_ABOUT
-                | IDC_OPEN_DATA_DIR | IDC_GESTURE_CLEAR | IDC_GESTURE_BINDING | IDC_OPEN_GITHUB => {
+                | IDC_NAV_HISTORY | IDC_NAV_GESTURES | IDC_NAV_APPLICATIONS | IDC_NAV_RESOURCES
+                | IDC_NAV_STATISTICS | IDC_NAV_ABOUT | IDC_OPEN_DATA_DIR | IDC_GESTURE_CLEAR
+                | IDC_GESTURE_BINDING | IDC_OPEN_GITHUB | IDC_GUARD_ADD_APP
+                | IDC_GUARD_REMOVE_APP => {
                     draw_button(draw);
                     1
                 }
@@ -981,7 +1098,8 @@ unsafe extern "system" fn main_proc(
                 }
                 IDC_TRIGGER_RIGHT | IDC_TRIGGER_X1 | IDC_TRIGGER_X2 | IDC_GESTURE_UP
                 | IDC_GESTURE_L | IDC_GESTURE_S | IDC_GESTURE_C | IDC_GESTURE_V
-                | IDC_GESTURE_LEFT | IDC_GESTURE_RIGHT | IDC_GESTURE_SEVEN | IDC_GESTURE_CIRCLE => {
+                | IDC_GESTURE_LEFT | IDC_GESTURE_RIGHT | IDC_GESTURE_SEVEN | IDC_GESTURE_CIRCLE
+                | IDC_STATS_DAY | IDC_STATS_MONTH | IDC_STATS_YEAR => {
                     draw_choice(draw);
                     1
                 }
@@ -1014,6 +1132,13 @@ unsafe extern "system" fn main_proc(
             }
             0
         }
+        WM_TIMER if wparam == TRAY_RETRY_TIMER_ID => {
+            unsafe { KillTimer(hwnd, TRAY_RETRY_TIMER_ID) };
+            if let Some(state) = state_mut() {
+                add_tray_icon(state);
+            }
+            0
+        }
         WM_CLOSE => {
             unsafe {
                 ShowWindow(hwnd, SW_HIDE);
@@ -1021,6 +1146,7 @@ unsafe extern "system" fn main_proc(
             0
         }
         WM_DESTROY => {
+            logging::info("进程", "主窗口销毁");
             if let Some(state) = state_mut() {
                 unsafe {
                     RemoveClipboardFormatListener(hwnd);
@@ -1445,6 +1571,30 @@ fn show_settings_page(state: &mut AppState, page: SettingsPage) {
             );
         }
     }
+    for &control in &state.controls.applications_page {
+        unsafe {
+            ShowWindow(
+                control,
+                if page == SettingsPage::Applications {
+                    SW_SHOW
+                } else {
+                    SW_HIDE
+                },
+            );
+        }
+    }
+    for &control in &state.controls.statistics_page {
+        unsafe {
+            ShowWindow(
+                control,
+                if page == SettingsPage::Statistics {
+                    SW_SHOW
+                } else {
+                    SW_HIDE
+                },
+            );
+        }
+    }
     for &control in &state.controls.resources_page {
         unsafe {
             ShowWindow(
@@ -1473,6 +1623,8 @@ fn show_settings_page(state: &mut AppState, page: SettingsPage) {
         SettingsPage::General => ("常规", "手势与启动"),
         SettingsPage::History => ("剪贴板历史", "记录与管理"),
         SettingsPage::Gestures => ("手势设置", "轨迹学习与动作绑定"),
+        SettingsPage::Applications => ("应用保护", "全屏与指定应用"),
+        SettingsPage::Statistics => ("手势统计", "日度、月度与年度使用排行"),
         SettingsPage::Resources => ("资源占用", "Xmouse 当前进程"),
         SettingsPage::About => ("关于", "功能、使用与项目"),
     };
@@ -1490,11 +1642,13 @@ fn show_settings_page(state: &mut AppState, page: SettingsPage) {
         InvalidateRect(state.controls.nav_general, ptr::null(), 1);
         InvalidateRect(state.controls.nav_history, ptr::null(), 1);
         InvalidateRect(state.controls.nav_gestures, ptr::null(), 1);
+        InvalidateRect(state.controls.nav_applications, ptr::null(), 1);
+        InvalidateRect(state.controls.nav_statistics, ptr::null(), 1);
         InvalidateRect(state.controls.nav_resources, ptr::null(), 1);
         InvalidateRect(state.controls.nav_about, ptr::null(), 1);
         ShowWindow(
             state.controls.save,
-            if page == SettingsPage::About {
+            if matches!(page, SettingsPage::About | SettingsPage::Statistics) {
                 SW_HIDE
             } else {
                 SW_SHOW
@@ -1507,6 +1661,35 @@ fn show_settings_page(state: &mut AppState, page: SettingsPage) {
         } else {
             KillTimer(state.main_hwnd, RESOURCE_TIMER_ID);
         }
+    }
+    if page == SettingsPage::Applications {
+        refresh_application_guard_ui(state);
+    }
+    if page == SettingsPage::Statistics {
+        set_stats_period(state, state.stats_period);
+    }
+}
+
+fn set_stats_period(state: &mut AppState, period: StatsPeriod) {
+    state.stats_period = period;
+    for (control, selected) in [
+        (state.controls.stats_day, period == StatsPeriod::Day),
+        (state.controls.stats_month, period == StatsPeriod::Month),
+        (state.controls.stats_year, period == StatsPeriod::Year),
+    ] {
+        set_check(control, selected);
+        redraw_control_without_erase(control);
+    }
+    match state.stats.snapshot(period) {
+        Ok(snapshot) => state.stats_snapshot = snapshot,
+        Err(error) => {
+            logging::error("读取手势统计", &error);
+            state.stats_snapshot = StatsSnapshot::default();
+            post_toast(state.main_hwnd as isize, "读取手势统计失败");
+        }
+    }
+    unsafe {
+        InvalidateRect(state.main_hwnd, ptr::null(), 0);
     }
 }
 
@@ -1521,6 +1704,7 @@ fn load_config_into_controls(state: &mut AppState) {
         state.controls.disable_fullscreen_gestures,
         config.gesture_guard.disable_in_fullscreen_apps,
     );
+    state.pending_gesture_guard = config.gesture_guard.clone();
     set_check(state.controls.capture, config.history.capture);
     set_check(state.controls.history_auto_paste, config.history.auto_paste);
     set_check(
@@ -1531,6 +1715,7 @@ fn load_config_into_controls(state: &mut AppState) {
     refresh_gesture_training_ui(state);
     refresh_status(state);
     refresh_history_usage(state);
+    refresh_application_guard_ui(state);
 }
 
 fn refresh_status(state: &AppState) {
@@ -1545,6 +1730,167 @@ fn refresh_status(state: &AppState) {
     );
     unsafe {
         InvalidateRect(state.controls.status, ptr::null(), 1);
+    }
+}
+
+fn external_application_name() -> Option<String> {
+    let hwnd = hook::last_external_foreground() as HWND;
+    if hwnd.is_null() || unsafe { IsWindow(hwnd) } == 0 {
+        return None;
+    }
+    let root = unsafe { GetAncestor(hwnd, GA_ROOT) };
+    let root = if root.is_null() { hwnd } else { root };
+    let mut process_id = 0;
+    unsafe {
+        GetWindowThreadProcessId(root, &mut process_id);
+    }
+    process_name(process_id)
+}
+
+fn refresh_application_guard_ui(state: &AppState) {
+    let target = external_application_name()
+        .map(|name| format!("当前应用：{name}"))
+        .unwrap_or_else(|| "当前应用：未获取".to_owned());
+    set_control_text(state.controls.gesture_guard_target, &target);
+
+    let exclusions = &state.pending_gesture_guard.excluded_processes;
+    let summary = if exclusions.is_empty() {
+        "尚未指定应用".to_owned()
+    } else {
+        let visible = exclusions
+            .iter()
+            .take(6)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join("、");
+        if exclusions.len() > 6 {
+            format!("已禁用 {} 个：{} 等", exclusions.len(), visible)
+        } else {
+            format!("已禁用 {} 个：{}", exclusions.len(), visible)
+        }
+    };
+    set_control_text(state.controls.gesture_guard_summary, &summary);
+}
+
+fn add_current_application_guard(state: &mut AppState) {
+    let Some(process) = external_application_name() else {
+        post_toast(
+            state.main_hwnd as isize,
+            "未获取目标应用，请先切换到目标窗口再打开设置",
+        );
+        return;
+    };
+    if !state.pending_gesture_guard.add_excluded_process(&process) {
+        post_toast(state.main_hwnd as isize, "该应用已在禁用名单中");
+        return;
+    }
+    refresh_application_guard_ui(state);
+    post_toast(
+        state.main_hwnd as isize,
+        &format!("已加入 {process}，保存后生效"),
+    );
+}
+
+fn show_application_guard_menu(state: &mut AppState) {
+    if state.pending_gesture_guard.excluded_processes.is_empty() {
+        post_toast(state.main_hwnd as isize, "禁用名单为空");
+        return;
+    }
+    let menu = unsafe { CreatePopupMenu() };
+    if menu.is_null() {
+        return;
+    }
+    let dark_mode = state.dark_mode;
+    let dark_menu_items: Vec<Box<widgets::PopupMenuItemData>> = if dark_mode {
+        state
+            .pending_gesture_guard
+            .excluded_processes
+            .iter()
+            .map(|process| {
+                Box::new(widgets::PopupMenuItemData::new(
+                    &format!("移除 {process}"),
+                    false,
+                ))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let menu_background = if dark_mode {
+        let brush = unsafe { CreateSolidBrush(palette(true).card) };
+        let info = MENUINFO {
+            cbSize: mem::size_of::<MENUINFO>() as u32,
+            fMask: MIM_BACKGROUND,
+            hbrBack: brush,
+            ..Default::default()
+        };
+        unsafe {
+            SetMenuInfo(menu, &info);
+        }
+        brush
+    } else {
+        ptr::null_mut()
+    };
+    for (index, process) in state
+        .pending_gesture_guard
+        .excluded_processes
+        .iter()
+        .enumerate()
+    {
+        if dark_mode {
+            append_owner_draw_menu_item(
+                menu,
+                IDM_GESTURE_EXCLUSION_BASE + index,
+                &dark_menu_items[index],
+            );
+        } else {
+            append_menu(
+                menu,
+                MF_STRING,
+                IDM_GESTURE_EXCLUSION_BASE + index,
+                &format!("移除 {process}"),
+            );
+        }
+    }
+    let mut button_rect = RECT::default();
+    let remove_button = unsafe { GetDlgItem(state.main_hwnd, IDC_GUARD_REMOVE_APP) };
+    unsafe {
+        GetWindowRect(remove_button, &mut button_rect);
+        SetForegroundWindow(state.main_hwnd);
+    }
+    if dark_mode {
+        DARK_HISTORY_MENU_FONT.store(state.font_body, Ordering::Release);
+        DARK_HISTORY_MENU_ACTIVE.store(true, Ordering::Release);
+    }
+    let command = unsafe {
+        TrackPopupMenu(
+            menu,
+            TPM_LEFTALIGN | TPM_RETURNCMD | TPM_RIGHTBUTTON,
+            button_rect.left,
+            button_rect.bottom + 4,
+            0,
+            state.main_hwnd,
+            ptr::null(),
+        )
+    } as usize;
+    DARK_HISTORY_MENU_ACTIVE.store(false, Ordering::Release);
+    DARK_HISTORY_MENU_FONT.store(ptr::null_mut(), Ordering::Release);
+    unsafe {
+        DestroyMenu(menu);
+        if !menu_background.is_null() {
+            DeleteObject(menu_background);
+        }
+    }
+    if command < IDM_GESTURE_EXCLUSION_BASE {
+        return;
+    }
+    let index = command - IDM_GESTURE_EXCLUSION_BASE;
+    if let Some(process) = state.pending_gesture_guard.remove_excluded_process(index) {
+        refresh_application_guard_ui(state);
+        post_toast(
+            state.main_hwnd as isize,
+            &format!("已移除 {process}，保存后生效"),
+        );
     }
 }
 
@@ -1973,6 +2319,8 @@ fn refresh_theme_resources(state: &mut AppState) {
         .iter()
         .chain(state.controls.history_page.iter())
         .chain(state.controls.gestures_page.iter())
+        .chain(state.controls.applications_page.iter())
+        .chain(state.controls.statistics_page.iter())
         .chain(state.controls.resources_page.iter())
         .chain(state.controls.about_page.iter())
         .copied()
@@ -1983,6 +2331,8 @@ fn refresh_theme_resources(state: &mut AppState) {
             state.controls.nav_general,
             state.controls.nav_history,
             state.controls.nav_gestures,
+            state.controls.nav_applications,
+            state.controls.nav_statistics,
             state.controls.nav_resources,
             state.controls.nav_about,
             state.controls.save,
@@ -2028,7 +2378,7 @@ fn read_config_from_controls(state: &AppState) -> Result<AppConfig> {
         gesture_bindings: current.gesture_bindings.clone(),
         gesture_guard: crate::config::GestureGuardConfig {
             disable_in_fullscreen_apps: is_checked(state.controls.disable_fullscreen_gestures),
-            ..current.gesture_guard
+            excluded_processes: state.pending_gesture_guard.excluded_processes.clone(),
         },
         history: crate::config::HistoryConfig {
             capture: is_checked(state.controls.capture),
@@ -2724,6 +3074,12 @@ fn paint_main_window(hwnd: HWND) {
         ],
         SettingsPage::History => &[(214, 100, 858, 246, 18), (214, 260, 858, 426, 18)],
         SettingsPage::Gestures => &[(214, 100, 858, 270, 18), (214, 278, 858, 632, 18)],
+        SettingsPage::Applications => &[(214, 100, 858, 246, 18), (214, 270, 858, 590, 18)],
+        SettingsPage::Statistics => &[
+            (214, 100, 858, 174, 18),
+            (214, 184, 858, 278, 18),
+            (214, 296, 858, 630, 18),
+        ],
         SettingsPage::Resources => &[
             (214, 104, 522, 244, 18),
             (536, 104, 858, 244, 18),
@@ -2739,6 +3095,16 @@ fn paint_main_window(hwnd: HWND) {
     };
     for &(left, top, right, bottom, radius) in cards {
         widgets::rounded_panel(hdc, left, top, right, bottom, radius, colors);
+    }
+
+    if state.active_settings_page == SettingsPage::Statistics {
+        stats_view::draw(
+            hdc,
+            colors,
+            state.font_body,
+            state.font_title,
+            &state.stats_snapshot,
+        );
     }
 
     if state.active_settings_page == SettingsPage::Gestures {
@@ -2810,6 +3176,8 @@ fn draw_button(draw: &DRAWITEMSTRUCT) {
         (IDC_NAV_GENERAL, SettingsPage::General)
             | (IDC_NAV_HISTORY, SettingsPage::History)
             | (IDC_NAV_GESTURES, SettingsPage::Gestures)
+            | (IDC_NAV_APPLICATIONS, SettingsPage::Applications)
+            | (IDC_NAV_STATISTICS, SettingsPage::Statistics)
             | (IDC_NAV_RESOURCES, SettingsPage::Resources)
             | (IDC_NAV_ABOUT, SettingsPage::About)
     );
@@ -2817,10 +3185,16 @@ fn draw_button(draw: &DRAWITEMSTRUCT) {
         ButtonRole::Status { enabled }
     } else if matches!(
         id,
-        IDC_NAV_GENERAL | IDC_NAV_HISTORY | IDC_NAV_GESTURES | IDC_NAV_RESOURCES | IDC_NAV_ABOUT
+        IDC_NAV_GENERAL
+            | IDC_NAV_HISTORY
+            | IDC_NAV_GESTURES
+            | IDC_NAV_APPLICATIONS
+            | IDC_NAV_STATISTICS
+            | IDC_NAV_RESOURCES
+            | IDC_NAV_ABOUT
     ) {
         ButtonRole::Navigation { active: nav_active }
-    } else if matches!(id, IDC_SAVE | IDC_HISTORY_COPY) {
+    } else if matches!(id, IDC_SAVE | IDC_HISTORY_COPY | IDC_GUARD_ADD_APP) {
         ButtonRole::Primary
     } else if matches!(
         id,
@@ -2832,7 +3206,13 @@ fn draw_button(draw: &DRAWITEMSTRUCT) {
     };
     let corner_color = if matches!(
         id,
-        IDC_NAV_GENERAL | IDC_NAV_HISTORY | IDC_NAV_GESTURES | IDC_NAV_RESOURCES | IDC_NAV_ABOUT
+        IDC_NAV_GENERAL
+            | IDC_NAV_HISTORY
+            | IDC_NAV_GESTURES
+            | IDC_NAV_APPLICATIONS
+            | IDC_NAV_STATISTICS
+            | IDC_NAV_RESOURCES
+            | IDC_NAV_ABOUT
     ) {
         colors.sidebar
     } else if matches!(
@@ -3021,6 +3401,9 @@ fn show_toast(state: &mut AppState) {
 }
 
 fn add_tray_icon(state: &mut AppState) {
+    if state.tray_added {
+        return;
+    }
     let mut data = tray_data(state.main_hwnd);
     data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     data.uCallbackMessage = WM_APP_TRAY;
@@ -3029,10 +3412,45 @@ fn add_tray_icon(state: &mut AppState) {
     copy_wide_fixed(&mut data.szTip, "Xmouse");
     if unsafe { Shell_NotifyIconW(NIM_ADD, &data) } != 0 {
         state.tray_added = true;
+        state.tray_retry_count = 0;
+        unsafe { KillTimer(state.main_hwnd, TRAY_RETRY_TIMER_ID) };
+        logging::info("托盘图标", "注册成功");
+    } else if unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) } != 0 {
+        // TaskbarCreated is also broadcast on some DPI changes, when the
+        // existing icon may still be registered rather than missing.
+        state.tray_added = true;
+        state.tray_retry_count = 0;
+        unsafe { KillTimer(state.main_hwnd, TRAY_RETRY_TIMER_ID) };
+        logging::info("托盘图标", "图标已存在，更新成功");
+    } else {
+        state.tray_retry_count = state.tray_retry_count.saturating_add(1);
+        if state.tray_retry_count == 1 || state.tray_retry_count == TRAY_RETRY_LIMIT {
+            logging::error(
+                "托盘图标",
+                format!(
+                    "注册失败，第 {} 次，Windows 错误 {}",
+                    state.tray_retry_count,
+                    unsafe { GetLastError() }
+                ),
+            );
+        }
+        if state.tray_retry_count < TRAY_RETRY_LIMIT
+            && unsafe {
+                SetTimer(
+                    state.main_hwnd,
+                    TRAY_RETRY_TIMER_ID,
+                    TRAY_RETRY_DELAY_MS,
+                    None,
+                )
+            } == 0
+        {
+            logging::error("托盘图标", "创建重试计时器失败");
+        }
     }
 }
 
 fn remove_tray_icon(state: &mut AppState) {
+    unsafe { KillTimer(state.main_hwnd, TRAY_RETRY_TIMER_ID) };
     if state.tray_added {
         let data = tray_data(state.main_hwnd);
         unsafe {
@@ -3130,53 +3548,6 @@ fn redraw_control_without_erase(control: HWND) {
         InvalidateRect(control, ptr::null(), 0);
         UpdateWindow(control);
     }
-}
-
-fn set_autostart(enabled: bool) -> Result<()> {
-    let key_path = wide("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
-    let value_name = wide("Xmouse");
-    let mut key: HKEY = ptr::null_mut();
-    let result = unsafe {
-        RegCreateKeyExW(
-            HKEY_CURRENT_USER,
-            key_path.as_ptr(),
-            0,
-            ptr::null_mut(),
-            REG_OPTION_NON_VOLATILE,
-            KEY_SET_VALUE,
-            ptr::null(),
-            &mut key,
-            ptr::null_mut(),
-        )
-    };
-    if result != 0 {
-        bail!("无法打开开机启动注册表项（错误 {result}）");
-    }
-    let operation_result = if enabled {
-        let executable = std::env::current_exe()?;
-        let quoted = format!("\"{}\" --background", executable.display());
-        let bytes: Vec<u16> = quoted.encode_utf16().chain(Some(0)).collect();
-        unsafe {
-            RegSetValueExW(
-                key,
-                value_name.as_ptr(),
-                0,
-                REG_SZ,
-                bytes.as_ptr() as *const u8,
-                (bytes.len() * 2) as u32,
-            )
-        }
-    } else {
-        let result = unsafe { RegDeleteValueW(key, value_name.as_ptr()) };
-        if result == 2 { 0 } else { result }
-    };
-    unsafe {
-        RegCloseKey(key);
-    }
-    if operation_result != 0 {
-        bail!("更新开机启动失败（错误 {operation_result}）");
-    }
-    Ok(())
 }
 
 fn window_text(hwnd: HWND) -> String {

@@ -15,7 +15,9 @@ flowchart LR
     Clipboard --> Storage["storage.rs · SQLite/媒体"]
     Hook --> Gesture["gesture.rs · 轨迹识别"]
     App --> Config["config.rs · 配置"]
+    App --> Autostart["autostart.rs · 管理员自启"]
     App --> Resources["resources.rs · 按需资源采样"]
+    Actions --> Stats["stats.rs · 手势事件与本地聚合"]
 ```
 
 ## 模块边界
@@ -36,6 +38,9 @@ flowchart LR
 | `gesture.rs` | 轨迹 ID、模板、个人样本归一化和识别 | 具体动作执行 |
 | `action.rs` | 有限安全动作枚举与用户文案 | `SendInput`、窗口句柄和 UI 状态 |
 | `actions.rs` | 轨迹绑定解析后的目标验证与动作执行 | 手势形状识别和任意脚本 |
+| `autostart.rs` | 提权助手、最高权限登录任务和旧启动项迁移 | UI 状态、手势与剪贴板业务 |
+| `stats.rs` | 手势事件存储、日/月/年聚合和排行 | 鼠标坐标、剪贴板正文和 UI 绘制 |
+| `ui/stats_view.rs` | 统计页数值、排行条形图绘制 | 数据库查询和事件写入 |
 
 依赖方向保持为 `app → ui/domain services`。纯绘制函数通过参数接收主题、字体和视图数据，不读取 `AppState`；这样可以独立调整页面而不影响钩子与存储线程。
 
@@ -50,17 +55,25 @@ flowchart LR
 
 线程间使用 Rust 通道和 `WM_APP_*` 消息。UI 句柄只在 UI 线程操作；共享配置使用 `Arc<RwLock<AppConfig>>`。
 
-钩子线程同时注册进程外 `EVENT_SYSTEM_FOREGROUND` WinEvent。前台切换且当前没有正在绘制的轨迹时，线程先安装新的 `WH_MOUSE_LL`，再原子替换并卸载旧句柄；这样可以恢复被 Windows 静默移除或在高完整性窗口期间受隔离的钩子。此机制不使用心跳输入、定时器或空闲轮询。钩子热路径对配置和轨迹状态只尝试非阻塞锁，竞争时直接放行原始输入。
+动作线程在识别、执行结束后，为每次完成绘制的轨迹写一条摘要日志和一条 SQLite 事件；普通右键重放不计入统计。统计数据库与剪贴板历史独立，记录时间、轨迹 ID、动作、结果、分数及采样点数量，不保存坐标或剪贴板数据。统计页只在打开和收到新事件消息时按本地日/月/年查询，无额外空闲计时器。
+
+钩子线程同时注册进程外 `EVENT_SYSTEM_FOREGROUND` WinEvent。前台切换且当前没有正在绘制的轨迹时，线程先安装新的 `WH_MOUSE_LL`，再原子替换并卸载旧句柄；这样可以恢复被 Windows 静默移除或在高完整性窗口期间受隔离的钩子。若前台一直不变，钩子线程使用 30 秒低频消息计时器重装一次，绘制中跳过。WinEvent 还记录最近活跃的非 Xmouse 顶层窗口及其进程规则命中状态，供“应用保护”页选择目标，并让常见的前台触发只做原子 PID/布尔值比较。后台窗口首次命中才按需查询进程名。不存在模拟心跳输入或高频空闲轮询；钩子热路径对配置和轨迹状态只尝试非阻塞锁，竞争时直接放行原始输入。
+
+托盘图标在 `WM_CREATE` 初次注册，若 Explorer 尚未就绪则每秒重试，最多 60 次；收到系统的 `TaskbarCreated` 广播时重新注册。广播也可能由 DPI 变化产生，因此 `NIM_ADD` 失败时再尝试 `NIM_MODIFY`。注册结果和进程生命周期写入不含剪贴板正文的本地日志。
 
 命中 `Shell_TrayWnd`、`Shell_SecondaryTrayWnd`、`NotifyIconOverflowWindow`、`TaskListThumbnailWnd`、`Xaml_WindowedPopupClass` 或 `#32768` 的右键直接交由 Windows，避免任务栏、托盘和系统菜单进入手势状态机。
 
+应用保护规则只保存和匹配 EXE 文件名，大小写无关。命中指定进程或通用全屏规则后，触发按下事件直接交给 Windows，不创建候选轨迹。名单不会提升 Xmouse 权限；中等完整性进程在高完整性、受保护进程和 UAC 安全桌面中仍遵循 UIPI，并只要求安全失败。
+
+管理员自启不使用 `requireAdministrator` 应用清单。设置保存时，`app.rs` 仅在开关变化或计划任务缺失时调用 `autostart.rs`；后者通过 Shell `runas` 启动同一可执行文件的一次性助手，并在单实例检查前处理内部参数。助手生成 UTF-16 任务 XML，再使用 `schtasks.exe` 创建当前用户 `ONLOGON + HIGHEST + InteractiveToken` 任务，动作固定为当前便携版路径和 `--startup`；XML 同时明确允许电池供电启动/运行并忽略重复实例。父进程等待助手退出，UAC 取消或任务失败时不保存新设置。正常启动只查询任务是否存在，不自动弹出 UAC；升级成功后清理旧版 `HKCU Run` 值。
+
 ## 持续质量边界
 
-`docs/REGRESSION-TEST-PLAN.md` 是用户可见行为的稳定索引。每个修复或新功能先选择回归编号，再决定自动化或真实 Windows 验证；`scripts/verify-test-baseline.ps1` 防止测试数量静默减少，`scripts/quality.ps1` 统一格式、Clippy、Release 测试和可选剪贴板/覆盖率检查。GitHub Actions 使用 MSVC 和仅限 CI 的 bundled SQLite 特性生成 LCOV，普通便携版仍使用随包分发的 `sqlite3.dll`，不增加应用体积。
+`docs/REGRESSION-TEST-PLAN.md` 是用户可见行为的稳定索引。每个修复或新功能先选择回归编号，再决定自动化或真实 Windows 验证；`scripts/verify-test-baseline.ps1` 防止测试数量静默减少，`scripts/quality.ps1` 统一格式、Clippy、Release 测试、最终可执行文件构建和可选剪贴板/覆盖率检查。显式构建步骤避免测试 Harness 已更新但交付 EXE 仍陈旧。GitHub Actions 使用 MSVC 和仅限 CI 的 bundled SQLite 特性生成 LCOV，普通便携版仍使用随包分发的 `sqlite3.dll`，不增加应用体积。
 
 行覆盖率只衡量可执行 Rust 路径，不能证明低级钩子、DWM 合成、任务栏类名、焦点和 UIPI 行为正确；这些能力保留真实 Windows 必测项。下一轮优先把触发状态机、动作后端和历史 ViewModel 从 Win32 消息过程抽出，提高可测性，而不是为提高数字执行窗口 API。
 
-键盘动作通过 `MapVirtualKeyW(MAPVK_VK_TO_VSC_EX)` 转换为硬件扫描码；扩展键同时设置 `KEYEVENTF_EXTENDEDKEY`，键盘事件的 `dwExtraInfo` 保持为零。鼠标重放仍使用独立事件标记防止再次进入 `WH_MOUSE_LL`。`Ctrl` 组合键按“修饰键按下 → 普通键按下 → 普通键释放 → 修饰键释放”的顺序分次发送并保留短暂按压时间，以兼容 Flutter 等维护自身硬件键状态的桌面框架。
+键盘动作通过 `MapVirtualKeyW(MAPVK_VK_TO_VSC_EX)` 转换为硬件扫描码；四个方向键即使映射结果没有 `E0` 前缀，也显式设置 `KEYEVENTF_EXTENDEDKEY`，键盘事件的 `dwExtraInfo` 保持为零。鼠标钩子优先根据 `LLMHF_INJECTED` 放行所有注入事件，并保留自身事件标记作为额外防线，避免鼠标重放再次成为手势候选。`Ctrl` 组合键按“修饰键按下 → 普通键按下 → 普通键释放 → 修饰键释放”的顺序分次发送并保留短暂按压时间，以兼容 Flutter 等维护自身硬件键状态的桌面框架。
 
 ## 个性化手势数据流
 

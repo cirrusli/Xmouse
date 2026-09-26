@@ -9,7 +9,7 @@ use std::{
     ptr,
     sync::{
         Arc, Mutex, OnceLock, RwLock,
-        atomic::{AtomicBool, AtomicIsize, AtomicPtr, Ordering},
+        atomic::{AtomicBool, AtomicIsize, AtomicPtr, AtomicU32, Ordering},
         mpsc::{self, Sender},
     },
     thread,
@@ -18,7 +18,7 @@ use std::{
 use windows_sys::Win32::{
     Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
     Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow},
-    System::LibraryLoader::GetModuleHandleW,
+    System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentProcessId},
     UI::{
         Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent},
         HiDpi::GetDpiForWindow,
@@ -29,10 +29,10 @@ use windows_sys::Win32::{
         WindowsAndMessaging::{
             CallNextHookEx, EVENT_SYSTEM_FOREGROUND, GA_ROOT, GetAncestor, GetClassNameW,
             GetForegroundWindow, GetMessageW, GetShellWindow, GetWindowRect,
-            GetWindowThreadProcessId, HHOOK, IsIconic, IsZoomed, MSG, MSLLHOOKSTRUCT, PostMessageW,
-            SetWindowsHookExW, UnhookWindowsHookEx, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT,
-            WINEVENT_SKIPOWNPROCESS, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_XBUTTONDOWN,
-            WM_XBUTTONUP, WindowFromPoint,
+            GetWindowThreadProcessId, HHOOK, IsIconic, IsZoomed, KillTimer, LLMHF_INJECTED, MSG,
+            MSLLHOOKSTRUCT, PostMessageW, SetTimer, SetWindowsHookExW, UnhookWindowsHookEx,
+            WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_MOUSEMOVE,
+            WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER, WM_XBUTTONDOWN, WM_XBUTTONUP, WindowFromPoint,
         },
     },
 };
@@ -44,10 +44,12 @@ pub const WM_APP_SHOW_HISTORY: u32 = 0x8004;
 pub const WM_APP_TOAST: u32 = 0x8005;
 pub const WM_APP_TRAY: u32 = 0x8006;
 pub const WM_APP_CAPTURE_DONE: u32 = 0x8007;
+pub const WM_APP_STATS_UPDATED: u32 = 0x8009;
 
 pub const INJECTED_EVENT_TOKEN: usize = 0x4743_4C49_505F_0001;
 const XBUTTON1_VALUE: u16 = 0x0001;
 const XBUTTON2_VALUE: u16 = 0x0002;
+const HOOK_REFRESH_INTERVAL_MS: u32 = 30_000;
 
 #[derive(Debug)]
 pub struct StrokeRequest {
@@ -58,8 +60,13 @@ pub struct StrokeRequest {
 #[derive(Debug)]
 pub enum HookCommand {
     Stroke(StrokeRequest),
-    Replay(TriggerButton),
-    Cancelled,
+    Replay {
+        button: TriggerButton,
+        attempted_samples: Option<usize>,
+    },
+    Cancelled {
+        sample_count: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +111,9 @@ struct HookContext {
 
 static CONTEXT: OnceLock<HookContext> = OnceLock::new();
 static MOUSE_HOOK: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+static LAST_EXTERNAL_FOREGROUND: AtomicIsize = AtomicIsize::new(0);
+static LAST_EXTERNAL_PROCESS_ID: AtomicU32 = AtomicU32::new(0);
+static LAST_EXTERNAL_IS_EXCLUDED: AtomicBool = AtomicBool::new(false);
 
 pub fn start(
     config: Arc<RwLock<AppConfig>>,
@@ -124,12 +134,14 @@ pub fn start(
     thread::Builder::new()
         .name("xmouse-hook".to_owned())
         .spawn(move || unsafe {
+            remember_external_foreground(GetForegroundWindow());
             let module = GetModuleHandleW(ptr::null()) as HINSTANCE;
             let installed = replace_mouse_hook(module);
             let _ = ready_sender.send(installed);
             if !installed {
                 return;
             }
+            crate::logging::info("鼠标钩子", "已安装");
             let foreground_hook = SetWinEventHook(
                 EVENT_SYSTEM_FOREGROUND,
                 EVENT_SYSTEM_FOREGROUND,
@@ -142,8 +154,37 @@ pub fn start(
             if foreground_hook.is_null() {
                 crate::logging::error("监控前台窗口", "安装 WinEvent 钩子失败");
             }
+            // A low-level hook can be silently removed after a callback timeout.
+            // A thread timer gives it a bounded recovery time even when the
+            // foreground window does not change. Never refresh mid-stroke.
+            let refresh_timer = SetTimer(ptr::null_mut(), 0, HOOK_REFRESH_INTERVAL_MS, None);
+            if refresh_timer == 0 {
+                crate::logging::error("鼠标钩子", "创建恢复计时器失败");
+            }
             let mut message = MSG::default();
-            while GetMessageW(&mut message, ptr::null_mut(), 0, 0) > 0 {}
+            loop {
+                let result = GetMessageW(&mut message, ptr::null_mut(), 0, 0);
+                if result <= 0 {
+                    if result < 0 {
+                        crate::logging::error("鼠标钩子", "消息循环读取失败");
+                    }
+                    break;
+                }
+                if refresh_timer != 0
+                    && message.hwnd.is_null()
+                    && message.message == WM_TIMER
+                    && message.wParam == refresh_timer
+                    && !CONTEXT
+                        .get()
+                        .is_some_and(|context| context.candidate_present.load(Ordering::Acquire))
+                    && !replace_mouse_hook(module)
+                {
+                    crate::logging::error("鼠标钩子", "定时恢复失败");
+                }
+            }
+            if refresh_timer != 0 {
+                KillTimer(ptr::null_mut(), refresh_timer);
+            }
             if !foreground_hook.is_null() {
                 UnhookWinEvent(foreground_hook);
             }
@@ -166,10 +207,8 @@ unsafe fn replace_mouse_hook(module: HINSTANCE) -> bool {
         return false;
     }
     let previous = MOUSE_HOOK.swap(replacement.cast(), Ordering::AcqRel) as HHOOK;
-    if !previous.is_null() {
-        unsafe {
-            UnhookWindowsHookEx(previous);
-        }
+    if !previous.is_null() && unsafe { UnhookWindowsHookEx(previous) } == 0 {
+        crate::logging::info("鼠标钩子", "旧钩子句柄已失效，已安装替代钩子");
     }
     true
 }
@@ -177,16 +216,19 @@ unsafe fn replace_mouse_hook(module: HINSTANCE) -> bool {
 unsafe extern "system" fn foreground_event_hook(
     _hook: HWINEVENTHOOK,
     event: u32,
-    _hwnd: HWND,
+    hwnd: HWND,
     _object_id: i32,
     _child_id: i32,
     _event_thread: u32,
     _event_time: u32,
 ) {
-    if event != EVENT_SYSTEM_FOREGROUND
-        || CONTEXT
-            .get()
-            .is_some_and(|context| context.candidate_present.load(Ordering::Acquire))
+    if event != EVENT_SYSTEM_FOREGROUND {
+        return;
+    }
+    remember_external_foreground(hwnd);
+    if CONTEXT
+        .get()
+        .is_some_and(|context| context.candidate_present.load(Ordering::Acquire))
     {
         return;
     }
@@ -194,6 +236,44 @@ unsafe extern "system" fn foreground_event_hook(
     if !unsafe { replace_mouse_hook(module) } {
         crate::logging::error("恢复鼠标钩子", "前台窗口切换后重新安装失败");
     }
+}
+
+pub fn last_external_foreground() -> isize {
+    LAST_EXTERNAL_FOREGROUND.load(Ordering::Acquire)
+}
+
+fn remember_external_foreground(hwnd: HWND) {
+    if hwnd.is_null() {
+        return;
+    }
+    let root = unsafe { GetAncestor(hwnd, GA_ROOT) };
+    let root = if root.is_null() { hwnd } else { root };
+    let mut process_id = 0;
+    unsafe {
+        GetWindowThreadProcessId(root, &mut process_id);
+    }
+    if process_id == 0
+        || process_id == unsafe { GetCurrentProcessId() }
+        || is_system_shell_surface(root)
+    {
+        return;
+    }
+    LAST_EXTERNAL_FOREGROUND.store(root as isize, Ordering::Release);
+    LAST_EXTERNAL_PROCESS_ID.store(process_id, Ordering::Release);
+    let excluded = CONTEXT
+        .get()
+        .and_then(|context| context.config.try_read().ok())
+        .and_then(|config| {
+            process_name(process_id).map(|name| {
+                config
+                    .gesture_guard
+                    .excluded_processes
+                    .iter()
+                    .any(|item| item.eq_ignore_ascii_case(&name))
+            })
+        })
+        .unwrap_or(false);
+    LAST_EXTERNAL_IS_EXCLUDED.store(excluded, Ordering::Release);
 }
 
 pub fn update_ui_hwnd(hwnd: isize) {
@@ -258,7 +338,12 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
         return unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) };
     };
     let event = unsafe { &*(lparam as *const MSLLHOOKSTRUCT) };
-    if event.dwExtraInfo == INJECTED_EVENT_TOKEN {
+    // Injected clicks must not start another candidate. Matching only our
+    // dwExtraInfo token proved insufficient on Windows: replayed right clicks
+    // could recursively trigger another replay until Xmouse was stopped.
+    // Pass injected input through to its target, but never treat it as a
+    // physical gesture.
+    if should_ignore_mouse_event(event.flags, event.dwExtraInfo) {
         return unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) };
     }
 
@@ -290,9 +375,14 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
             if candidate.active {
                 post_simple(context, WM_APP_OVERLAY_END);
             }
-            let _ = context
-                .command_sender
-                .send(HookCommand::Replay(candidate.button));
+            let _ = context.command_sender.send(HookCommand::Replay {
+                button: candidate.button,
+                attempted_samples: attempted_gesture(
+                    candidate.max_distance_px,
+                    candidate.activation_distance_px,
+                )
+                .then_some(candidate.points.len()),
+            });
         } else if candidate.active {
             post_simple(context, WM_APP_OVERLAY_END);
             let _ = context
@@ -302,7 +392,9 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     target_hwnd: candidate.target_hwnd,
                 }));
         } else {
-            let _ = context.command_sender.send(HookCommand::Cancelled);
+            let _ = context.command_sender.send(HookCommand::Cancelled {
+                sample_count: candidate.points.len(),
+            });
         }
         return 1;
     }
@@ -463,6 +555,9 @@ fn is_process_excluded(hwnd: HWND, excluded_processes: &[String]) -> bool {
     unsafe {
         GetWindowThreadProcessId(hwnd, &mut process_id);
     }
+    if process_id == LAST_EXTERNAL_PROCESS_ID.load(Ordering::Acquire) {
+        return LAST_EXTERNAL_IS_EXCLUDED.load(Ordering::Acquire);
+    }
     let Some(name) = process_name(process_id) else {
         return false;
     };
@@ -603,17 +698,44 @@ fn gesture_committed(
     path_length >= minimum_stroke_length && max_distance >= activation_distance * 1.5
 }
 
+fn attempted_gesture(max_distance: f32, activation_distance: f32) -> bool {
+    max_distance >= activation_distance * 1.5
+}
+
+fn should_ignore_mouse_event(flags: u32, extra_info: usize) -> bool {
+    flags & LLMHF_INJECTED != 0 || extra_info == INJECTED_EVENT_TOKEN
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        GesturePoint, RECT, UiPoint, gesture_committed, is_system_shell_class, rect_covers_monitor,
-        stroke_ui_points,
+        GesturePoint, INJECTED_EVENT_TOKEN, RECT, UiPoint, attempted_gesture, gesture_committed,
+        is_system_shell_class, rect_covers_monitor, should_ignore_mouse_event, stroke_ui_points,
     };
+    use windows_sys::Win32::UI::WindowsAndMessaging::LLMHF_INJECTED;
+
+    #[test]
+    fn injected_mouse_events_never_reenter_gesture_recognition() {
+        assert!(should_ignore_mouse_event(LLMHF_INJECTED, 0));
+        assert!(should_ignore_mouse_event(
+            LLMHF_INJECTED,
+            INJECTED_EVENT_TOKEN
+        ));
+        assert!(should_ignore_mouse_event(0, INJECTED_EVENT_TOKEN));
+        assert!(!should_ignore_mouse_event(0, 0));
+    }
 
     #[test]
     fn short_or_jittery_drag_is_not_committed() {
         assert!(!gesture_committed(20.0, 18.0, 12.0, 28.0));
         assert!(!gesture_committed(80.0, 8.0, 12.0, 28.0));
+    }
+
+    #[test]
+    fn only_clear_short_drags_are_logged_as_attempted_gestures() {
+        assert!(!attempted_gesture(2.0, 12.0));
+        assert!(!attempted_gesture(17.0, 12.0));
+        assert!(attempted_gesture(18.0, 12.0));
     }
 
     #[test]

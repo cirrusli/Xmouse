@@ -1,10 +1,11 @@
 use crate::{
     action::ActionKind,
-    clipboard::ClipboardService,
+    clipboard::{ClipboardService, process_name},
     config::AppConfig,
     gesture::{Recognizer, UserGestureTemplate},
-    hook::{HookCommand, WM_APP_SHOW_HISTORY, WM_APP_TOAST, replay_button},
+    hook::{HookCommand, WM_APP_SHOW_HISTORY, WM_APP_STATS_UPDATED, WM_APP_TOAST, replay_button},
     logging,
+    stats::{GestureEvent, GestureStats, Outcome},
 };
 use anyhow::{Context, Result, bail};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
@@ -30,15 +31,17 @@ use windows_sys::Win32::{
         Input::KeyboardAndMouse::{
             INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
             KEYEVENTF_SCANCODE, MAPVK_VK_TO_VSC_EX, MapVirtualKeyW, SendInput, VK_BROWSER_BACK,
-            VK_BROWSER_FORWARD, VK_CONTROL, VK_ESCAPE, VK_LEFT, VK_LWIN, VK_MEDIA_PLAY_PAUSE,
-            VK_RIGHT, VK_SHIFT, VK_TAB, VK_VOLUME_DOWN, VK_VOLUME_MUTE, VK_VOLUME_UP,
+            VK_BROWSER_FORWARD, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_LWIN,
+            VK_MEDIA_PLAY_PAUSE, VK_RIGHT, VK_SHIFT, VK_TAB, VK_UP, VK_VOLUME_DOWN, VK_VOLUME_MUTE,
+            VK_VOLUME_UP,
         },
         Shell::ShellExecuteW,
         WindowsAndMessaging::{
-            GA_ROOT, GWL_EXSTYLE, GetAncestor, GetForegroundWindow, GetWindowLongPtrW,
-            HWND_NOTOPMOST, HWND_TOPMOST, IsWindow, IsZoomed, PostMessageW, SW_MAXIMIZE,
-            SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE,
-            SWP_NOSIZE, SetForegroundWindow, SetWindowPos, ShowWindow, WS_EX_TOPMOST,
+            GA_ROOT, GA_ROOTOWNER, GWL_EXSTYLE, GetAncestor, GetForegroundWindow,
+            GetWindowLongPtrW, GetWindowThreadProcessId, HWND_NOTOPMOST, HWND_TOPMOST, IsWindow,
+            IsZoomed, PostMessageW, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL,
+            SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow,
+            SetWindowPos, ShowWindow, WM_CLOSE, WS_EX_TOPMOST,
         },
     },
 };
@@ -47,6 +50,7 @@ pub fn run_worker(
     receiver: Receiver<HookCommand>,
     config: Arc<RwLock<AppConfig>>,
     clipboard: ClipboardService,
+    stats: GestureStats,
     ui_hwnd: isize,
 ) {
     thread::Builder::new()
@@ -60,9 +64,42 @@ pub fn run_worker(
             let mut recognizer = Recognizer::new();
             let mut loaded_user_templates: Vec<UserGestureTemplate> = Vec::new();
             while let Ok(command) = receiver.recv() {
-                let result = match command {
-                    HookCommand::Replay(button) => replay_button(button),
-                    HookCommand::Cancelled => Ok(()),
+                match command {
+                    HookCommand::Replay {
+                        button,
+                        attempted_samples,
+                    } => {
+                        if let Err(error) = replay_button(button) {
+                            logging::error("重放鼠标按键", &error);
+                            post_toast(ui_hwnd, &format!("操作失败：{error:#}"));
+                        }
+                        if let Some(sample_count) = attempted_samples {
+                            record_gesture(
+                                &stats,
+                                ui_hwnd,
+                                GestureEvent {
+                                    gesture: None,
+                                    action: None,
+                                    outcome: Outcome::TooShort,
+                                    score: None,
+                                    sample_count,
+                                },
+                            );
+                        }
+                    }
+                    HookCommand::Cancelled { sample_count } => {
+                        record_gesture(
+                            &stats,
+                            ui_hwnd,
+                            GestureEvent {
+                                gesture: None,
+                                action: None,
+                                outcome: Outcome::Cancelled,
+                                score: None,
+                                sample_count,
+                            },
+                        );
+                    }
                     HookCommand::Stroke(stroke) => {
                         let (threshold, user_templates) = {
                             let config = config.read().expect("config poisoned");
@@ -73,25 +110,88 @@ pub fn run_worker(
                             loaded_user_templates = user_templates;
                         }
                         let Some(matched) = recognizer.recognize(&stroke.points, threshold) else {
+                            record_gesture(
+                                &stats,
+                                ui_hwnd,
+                                GestureEvent {
+                                    gesture: None,
+                                    action: None,
+                                    outcome: Outcome::Unrecognized,
+                                    score: None,
+                                    sample_count: stroke.points.len(),
+                                },
+                            );
                             post_toast(ui_hwnd, "未识别手势");
                             continue;
                         };
-                        let _recognition_score = matched.score;
                         let action = config
                             .read()
                             .expect("config poisoned")
                             .action_for(matched.gesture);
-                        execute_action(action, stroke.target_hwnd, &config, &clipboard, ui_hwnd)
+                        let result = execute_action(
+                            action,
+                            stroke.target_hwnd,
+                            &config,
+                            &clipboard,
+                            ui_hwnd,
+                        );
+                        let outcome = if action == ActionKind::Disabled {
+                            Outcome::Disabled
+                        } else if result.is_ok() {
+                            Outcome::Success
+                        } else {
+                            Outcome::Failed
+                        };
+                        record_gesture(
+                            &stats,
+                            ui_hwnd,
+                            GestureEvent {
+                                gesture: Some(matched.gesture),
+                                action: Some(action),
+                                outcome,
+                                score: Some(matched.score),
+                                sample_count: stroke.points.len(),
+                            },
+                        );
+                        if let Err(error) = result {
+                            let detail = format!("{error:#}");
+                            logging::error("执行手势", &detail);
+                            post_toast(ui_hwnd, &format!("操作失败：{detail}"));
+                        }
                     }
-                };
-                if let Err(error) = result {
-                    let detail = format!("{error:#}");
-                    logging::error("执行手势", &detail);
-                    post_toast(ui_hwnd, &format!("操作失败：{detail}"));
                 }
             }
         })
         .expect("failed to spawn action worker");
+}
+
+fn record_gesture(stats: &GestureStats, ui_hwnd: isize, event: GestureEvent) {
+    logging::info(
+        "手势",
+        format!(
+            "轨迹={} 动作={} 结果={} 得分={} 采样点={}",
+            event
+                .gesture
+                .map(|gesture| format!("{gesture:?}"))
+                .unwrap_or_else(|| "none".to_owned()),
+            event
+                .action
+                .map(|action| format!("{action:?}"))
+                .unwrap_or_else(|| "none".to_owned()),
+            event.outcome.key(),
+            event
+                .score
+                .map(|score| format!("{score:.3}"))
+                .unwrap_or_else(|| "-".to_owned()),
+            event.sample_count,
+        ),
+    );
+    match stats.record(event) {
+        Ok(()) => unsafe {
+            PostMessageW(ui_hwnd as HWND, WM_APP_STATS_UPDATED, 0, 0);
+        },
+        Err(error) => logging::error("手势统计", &error),
+    }
 }
 
 fn execute_action(
@@ -105,12 +205,7 @@ fn execute_action(
     match action {
         ActionKind::Disabled => Ok(()),
         ActionKind::ToggleTopmost => toggle_topmost(target, ui_hwnd),
-        ActionKind::CloseTab => {
-            activate_target(target)?;
-            send_ctrl_key(b'W' as u16)?;
-            post_toast(ui_hwnd, "已发送 Ctrl+W");
-            Ok(())
-        }
+        ActionKind::CloseTab => close_tab_or_compatible_window(target, ui_hwnd),
         ActionKind::CopySelection => {
             activate_target(target)?;
             send_ctrl_key(b'C' as u16)?;
@@ -224,25 +319,107 @@ fn activate_target(target: HWND) -> Result<()> {
         bail!("目标窗口已经关闭");
     }
     let foreground = unsafe { GetForegroundWindow() };
-    let foreground_root = if foreground.is_null() {
-        foreground
-    } else {
-        unsafe { GetAncestor(foreground, GA_ROOT) }
-    };
-    if foreground_root != target && unsafe { SetForegroundWindow(target) } == 0 {
-        bail!("Windows 阻止了目标窗口激活");
+    if windows_share_input_target(target, foreground) {
+        return Ok(());
     }
-    thread::sleep(Duration::from_millis(30));
+
+    // SetForegroundWindow may report failure while a foreground transition is
+    // already in flight. Verify the actual foreground window for a short,
+    // bounded period instead of treating the return value as the final state.
+    let activation_requested = unsafe { SetForegroundWindow(target) } != 0;
+    let deadline = Instant::now() + Duration::from_millis(150);
+    while Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+        let foreground = unsafe { GetForegroundWindow() };
+        if windows_share_input_target(target, foreground) {
+            return Ok(());
+        }
+    }
+
+    let target_process = window_process_id(target).unwrap_or_default();
     let foreground = unsafe { GetForegroundWindow() };
-    let foreground_root = if foreground.is_null() {
-        foreground
-    } else {
-        unsafe { GetAncestor(foreground, GA_ROOT) }
-    };
-    if foreground_root != target {
-        bail!("目标窗口未获得焦点");
+    let foreground_process = window_process_id(foreground).unwrap_or_default();
+    if activation_requested {
+        bail!("目标窗口未获得焦点（目标 PID {target_process}，前台 PID {foreground_process}）");
     }
+    bail!("Windows 阻止了目标窗口激活（目标 PID {target_process}，前台 PID {foreground_process}）")
+}
+
+fn close_tab_or_compatible_window(target: HWND, ui_hwnd: isize) -> Result<()> {
+    if target.is_null() || unsafe { IsWindow(target) } == 0 {
+        bail!("目标窗口已经关闭");
+    }
+    if let Some(close_target) = wallpaper_ui_close_target(target) {
+        if unsafe { PostMessageW(close_target, WM_CLOSE, 0, 0) } == 0 {
+            bail!("Wallpaper UI 拒绝了关闭请求");
+        }
+        post_toast(ui_hwnd, "已关闭 Wallpaper UI");
+        return Ok(());
+    }
+
+    activate_target(target)?;
+    send_ctrl_key(b'W' as u16)?;
+    post_toast(ui_hwnd, "已发送 Ctrl+W");
     Ok(())
+}
+
+fn wallpaper_ui_close_target(target: HWND) -> Option<HWND> {
+    let candidates = [
+        window_ancestor_or_self(target, GA_ROOTOWNER),
+        window_ancestor_or_self(target, GA_ROOT),
+        target,
+    ];
+    candidates.into_iter().find(|candidate| {
+        window_process_id(*candidate)
+            .and_then(process_name)
+            .is_some_and(|name| is_wallpaper_ui_process_name(&name))
+    })
+}
+
+fn is_wallpaper_ui_process_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("wallpaperui.exe")
+}
+
+fn windows_share_input_target(target: HWND, foreground: HWND) -> bool {
+    if target.is_null() || foreground.is_null() {
+        return false;
+    }
+    if target == foreground {
+        return true;
+    }
+
+    let target_root = window_ancestor_or_self(target, GA_ROOT);
+    let foreground_root = window_ancestor_or_self(foreground, GA_ROOT);
+    if target_root == foreground_root {
+        return true;
+    }
+
+    let target_owner = window_ancestor_or_self(target, GA_ROOTOWNER);
+    let foreground_owner = window_ancestor_or_self(foreground, GA_ROOTOWNER);
+    if target_owner == foreground_owner {
+        return true;
+    }
+
+    matches!(
+        (window_process_id(target_root), window_process_id(foreground_root)),
+        (Some(target_process), Some(foreground_process)) if target_process == foreground_process
+    )
+}
+
+fn window_ancestor_or_self(window: HWND, flag: u32) -> HWND {
+    let ancestor = unsafe { GetAncestor(window, flag) };
+    if ancestor.is_null() { window } else { ancestor }
+}
+
+fn window_process_id(window: HWND) -> Option<u32> {
+    if window.is_null() {
+        return None;
+    }
+    let mut process_id = 0;
+    unsafe {
+        GetWindowThreadProcessId(window, &mut process_id);
+    }
+    (process_id != 0).then_some(process_id)
 }
 
 fn send_ctrl_key(key: u16) -> Result<()> {
@@ -368,25 +545,20 @@ fn send_inputs(inputs: &mut [INPUT], error_message: &str) -> Result<()> {
 }
 
 fn send_virtual_desktop_switch(direction: u16) -> Result<()> {
-    let mut inputs = [
+    let mut inputs = desktop_switch_inputs(direction);
+    send_inputs(&mut inputs, "切换桌面的快捷键被系统拒绝")?;
+    Ok(())
+}
+
+fn desktop_switch_inputs(direction: u16) -> [INPUT; 6] {
+    [
         keyboard_input(VK_LWIN, 0),
         keyboard_input(VK_CONTROL, 0),
         keyboard_input(direction, 0),
         keyboard_input(direction, KEYEVENTF_KEYUP),
         keyboard_input(VK_CONTROL, KEYEVENTF_KEYUP),
         keyboard_input(VK_LWIN, KEYEVENTF_KEYUP),
-    ];
-    let sent = unsafe {
-        SendInput(
-            inputs.len() as u32,
-            inputs.as_mut_ptr(),
-            std::mem::size_of::<INPUT>() as i32,
-        )
-    };
-    if sent != inputs.len() as u32 {
-        bail!("切换桌面的快捷键被系统拒绝");
-    }
-    Ok(())
+    ]
 }
 
 fn keyboard_input(key: u16, flags: u32) -> INPUT {
@@ -394,11 +566,15 @@ fn keyboard_input(key: u16, flags: u32) -> INPUT {
     let (virtual_key, scan_code, scan_flags) = if mapped_scan == 0 {
         (key, 0, 0)
     } else {
-        let extended = if mapped_scan & 0xFF00 != 0 {
-            KEYEVENTF_EXTENDEDKEY
-        } else {
-            0
-        };
+        // Some keyboard layouts map VK_LEFT/RIGHT to the shared numpad scan
+        // codes (0x4B/0x4D) without an E0 prefix. The dedicated arrow keys
+        // still require KEYEVENTF_EXTENDEDKEY for shell shortcuts.
+        let extended =
+            if mapped_scan & 0xFF00 != 0 || matches!(key, VK_LEFT | VK_RIGHT | VK_UP | VK_DOWN) {
+                KEYEVENTF_EXTENDEDKEY
+            } else {
+                0
+            };
         (
             0,
             (mapped_scan & 0xFF) as u16,
@@ -528,9 +704,12 @@ fn wide(value: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ctrl_key_inputs, keyboard_input};
+    use super::{
+        ctrl_key_inputs, desktop_switch_inputs, is_wallpaper_ui_process_name, keyboard_input,
+        windows_share_input_target,
+    };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, VK_LWIN,
+        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, VK_LEFT, VK_LWIN, VK_RIGHT,
     };
 
     #[test]
@@ -562,5 +741,46 @@ mod tests {
         assert_eq!(keys[1].dwFlags & KEYEVENTF_KEYUP, 0);
         assert_ne!(keys[2].dwFlags & KEYEVENTF_KEYUP, 0);
         assert_ne!(keys[3].dwFlags & KEYEVENTF_KEYUP, 0);
+    }
+
+    #[test]
+    fn desktop_switch_uses_extended_arrows_with_modifiers_held() {
+        for direction in [VK_LEFT, VK_RIGHT] {
+            let keys = desktop_switch_inputs(direction).map(|input| unsafe { input.Anonymous.ki });
+            assert_eq!(keys[0].wScan, keys[5].wScan);
+            assert_eq!(keys[1].wScan, keys[4].wScan);
+            assert_eq!(keys[2].wScan, keys[3].wScan);
+            let expected_scan =
+                unsafe { super::MapVirtualKeyW(direction as u32, super::MAPVK_VK_TO_VSC_EX) };
+            assert_ne!(expected_scan, 0);
+            assert_eq!(keys[2].wScan, (expected_scan & 0xFF) as u16);
+            assert_ne!(keys[2].dwFlags & KEYEVENTF_SCANCODE, 0);
+            assert_ne!(keys[2].dwFlags & KEYEVENTF_EXTENDEDKEY, 0);
+            assert_ne!(keys[3].dwFlags & KEYEVENTF_EXTENDEDKEY, 0);
+            assert_eq!(keys[2].dwFlags & KEYEVENTF_KEYUP, 0);
+            assert_ne!(keys[3].dwFlags & KEYEVENTF_KEYUP, 0);
+            assert_eq!(keys[0].dwFlags & KEYEVENTF_KEYUP, 0);
+            assert_eq!(keys[1].dwFlags & KEYEVENTF_KEYUP, 0);
+            assert_ne!(keys[4].dwFlags & KEYEVENTF_KEYUP, 0);
+            assert_ne!(keys[5].dwFlags & KEYEVENTF_KEYUP, 0);
+            assert_eq!(keys[0].dwExtraInfo, 0);
+            assert_eq!(keys[1].dwExtraInfo, 0);
+        }
+    }
+
+    #[test]
+    fn null_windows_never_share_an_input_target() {
+        assert!(!windows_share_input_target(
+            std::ptr::null_mut(),
+            std::ptr::null_mut()
+        ));
+    }
+
+    #[test]
+    fn wallpaper_ui_compatibility_rule_is_process_specific() {
+        assert!(is_wallpaper_ui_process_name("wallpaperui.exe"));
+        assert!(is_wallpaper_ui_process_name("WallpaperUI.EXE"));
+        assert!(!is_wallpaper_ui_process_name("wallpaper64.exe"));
+        assert!(!is_wallpaper_ui_process_name("msedge.exe"));
     }
 }

@@ -2,7 +2,7 @@
 
 Xmouse 是面向 Windows 10/11 x64 的轻量鼠标手势与剪贴板历史工具。它使用 Rust 和原生 Win32 API，不包含 WebView 或托管 UI 运行时。
 
-当前版本：**0.14.2**
+当前版本：**0.15.0**
 
 作者：[cirrusli](https://github.com/cirrusli) · 项目地址：[github.com/cirrusli/Xmouse](https://github.com/cirrusli/Xmouse)
 
@@ -10,7 +10,7 @@ Xmouse 是面向 Windows 10/11 x64 的轻量鼠标手势与剪贴板历史工具
 
 双击根目录的 `启动 Xmouse.cmd`。脚本会从 `latest\Xmouse.exe` 启动当前最新版。
 
-便携版也可以直接解压 `outputs\Xmouse-0.14.2-windows-x64.zip` 后运行 `Xmouse.exe`。请保留 `sqlite3.dll` 与程序在同一目录。
+便携版也可以直接解压 `outputs\Xmouse-0.15.0-windows-x64.zip` 后运行 `Xmouse.exe`。请保留 `sqlite3.dll` 与程序在同一目录。
 
 ## 目录结构
 
@@ -32,7 +32,7 @@ Xmouse 是面向 Windows 10/11 x64 的轻量鼠标手势与剪贴板历史工具
 - 工程架构与模块边界：`docs\ARCHITECTURE.md`
 - 代码现状、性能瓶颈和下一阶段优先级：`docs\CURRENT-STATE-AND-ROADMAP.md`
 - 持续回归清单与变更影响映射：`docs\REGRESSION-TEST-PLAN.md`
-- 当前版本说明：`docs\RELEASE-NOTES-0.14.2.md`
+- 当前版本说明：`docs\RELEASE-NOTES-0.15.0.md`
 - 完整版本历史：`CHANGELOG.md`
 
 ## 默认手势
@@ -60,6 +60,7 @@ Xmouse 是面向 Windows 10/11 x64 的轻量鼠标手势与剪贴板历史工具
 - 设置页和剪贴板历史支持浅色、深色模式同步切换。
 - 常用设置只保留启用状态、开机管理员启动、触发键、历史记录和本机加密；首次启用管理员启动时会显示一次 UAC，后续登录不再确认。
 - “资源占用”页显示当前进程的 CPU、GPU、私有内存、工作集、句柄和运行时间。
+- “手势统计”页展示今日、本月、今年的使用频率排行；绘制结果保存在本机 `gesture-stats.db`，每次绘制对应一条不含轨迹坐标的摘要日志。
 - “关于”页集中介绍核心功能、默认手势、使用方式和项目 GitHub 地址。
 - 剪贴板历史页及弹窗右上角显示记录总数与实际磁盘占用。
 - 历史弹窗可按全部/文本/图片以及来源应用组合筛选，搜索命中词会直接高亮；分段按钮切换无背景闪烁，来源菜单完整适配深色主题。
@@ -83,6 +84,7 @@ Edge 内置手势与 Xmouse 都会使用“按住右键并拖动”，不建议�
 ## 数据与隐私
 
 - 历史保存在 `%LOCALAPPDATA%\Xmouse`。
+- 手势使用统计单独保存在同目录的 `gesture-stats.db`；只含时间、手势、动作和结果，不含轨迹坐标、选中文本或剪贴板正文。普通右键点击不计入手势统计。
 - 新记录默认明文保存：文本位于 `history.db` 的 `plain_text` 列，图片以 PNG 保存在 `media` 目录，便于个人调试。
 - “本机加密”是可选的 Windows DPAPI 保护；启用后，仅新记录按当前 Windows 用户加密。
 - 不包含遥测、云同步或应用内网络请求。S 手势只把搜索 URL 交给系统默认浏览器。
@@ -99,6 +101,6 @@ cargo build --release
 
 每次变更建议运行 `scripts\quality.ps1`；剪贴板相关变更运行 `scripts\quality.ps1 -ClipboardRoundTrip`。GitHub Actions 还会检查测试数量、Clippy、Release 测试并生成覆盖率报告。完整必测项见 `docs\REGRESSION-TEST-PLAN.md`。
 
-Release 可执行文件位于 `target\release\xmouse.exe`。当前版本说明见 `docs\RELEASE-NOTES-0.14.2.md`，完整变更历史见 `CHANGELOG.md`。
+Release 可执行文件位于 `target\release\xmouse.exe`。当前版本说明见 `docs\RELEASE-NOTES-0.15.0.md`，完整变更历史见 `CHANGELOG.md`。
 
 首次启动会打开设置页并创建托盘图标。关闭设置页只会隐藏窗口；需要从托盘菜单选择“退出 Xmouse”结束进程。

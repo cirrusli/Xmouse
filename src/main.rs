@@ -10,6 +10,7 @@ mod gesture;
 mod hook;
 mod logging;
 mod resources;
+mod stats;
 mod storage;
 mod ui;
 

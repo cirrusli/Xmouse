@@ -44,6 +44,7 @@ pub const WM_APP_SHOW_HISTORY: u32 = 0x8004;
 pub const WM_APP_TOAST: u32 = 0x8005;
 pub const WM_APP_TRAY: u32 = 0x8006;
 pub const WM_APP_CAPTURE_DONE: u32 = 0x8007;
+pub const WM_APP_STATS_UPDATED: u32 = 0x8009;
 
 pub const INJECTED_EVENT_TOKEN: usize = 0x4743_4C49_505F_0001;
 const XBUTTON1_VALUE: u16 = 0x0001;
@@ -59,8 +60,13 @@ pub struct StrokeRequest {
 #[derive(Debug)]
 pub enum HookCommand {
     Stroke(StrokeRequest),
-    Replay(TriggerButton),
-    Cancelled,
+    Replay {
+        button: TriggerButton,
+        attempted_samples: Option<usize>,
+    },
+    Cancelled {
+        sample_count: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -369,9 +375,14 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
             if candidate.active {
                 post_simple(context, WM_APP_OVERLAY_END);
             }
-            let _ = context
-                .command_sender
-                .send(HookCommand::Replay(candidate.button));
+            let _ = context.command_sender.send(HookCommand::Replay {
+                button: candidate.button,
+                attempted_samples: attempted_gesture(
+                    candidate.max_distance_px,
+                    candidate.activation_distance_px,
+                )
+                .then_some(candidate.points.len()),
+            });
         } else if candidate.active {
             post_simple(context, WM_APP_OVERLAY_END);
             let _ = context
@@ -381,7 +392,9 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     target_hwnd: candidate.target_hwnd,
                 }));
         } else {
-            let _ = context.command_sender.send(HookCommand::Cancelled);
+            let _ = context.command_sender.send(HookCommand::Cancelled {
+                sample_count: candidate.points.len(),
+            });
         }
         return 1;
     }
@@ -685,6 +698,10 @@ fn gesture_committed(
     path_length >= minimum_stroke_length && max_distance >= activation_distance * 1.5
 }
 
+fn attempted_gesture(max_distance: f32, activation_distance: f32) -> bool {
+    max_distance >= activation_distance * 1.5
+}
+
 fn should_ignore_mouse_event(flags: u32, extra_info: usize) -> bool {
     flags & LLMHF_INJECTED != 0 || extra_info == INJECTED_EVENT_TOKEN
 }
@@ -692,7 +709,7 @@ fn should_ignore_mouse_event(flags: u32, extra_info: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        GesturePoint, INJECTED_EVENT_TOKEN, RECT, UiPoint, gesture_committed,
+        GesturePoint, INJECTED_EVENT_TOKEN, RECT, UiPoint, attempted_gesture, gesture_committed,
         is_system_shell_class, rect_covers_monitor, should_ignore_mouse_event, stroke_ui_points,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::LLMHF_INJECTED;
@@ -712,6 +729,13 @@ mod tests {
     fn short_or_jittery_drag_is_not_committed() {
         assert!(!gesture_committed(20.0, 18.0, 12.0, 28.0));
         assert!(!gesture_committed(80.0, 8.0, 12.0, 28.0));
+    }
+
+    #[test]
+    fn only_clear_short_drags_are_logged_as_attempted_gestures() {
+        assert!(!attempted_gesture(2.0, 12.0));
+        assert!(!attempted_gesture(17.0, 12.0));
+        assert!(attempted_gesture(18.0, 12.0));
     }
 
     #[test]

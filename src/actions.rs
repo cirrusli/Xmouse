@@ -3,8 +3,9 @@ use crate::{
     clipboard::{ClipboardService, process_name},
     config::AppConfig,
     gesture::{Recognizer, UserGestureTemplate},
-    hook::{HookCommand, WM_APP_SHOW_HISTORY, WM_APP_TOAST, replay_button},
+    hook::{HookCommand, WM_APP_SHOW_HISTORY, WM_APP_STATS_UPDATED, WM_APP_TOAST, replay_button},
     logging,
+    stats::{GestureEvent, GestureStats, Outcome},
 };
 use anyhow::{Context, Result, bail};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
@@ -49,6 +50,7 @@ pub fn run_worker(
     receiver: Receiver<HookCommand>,
     config: Arc<RwLock<AppConfig>>,
     clipboard: ClipboardService,
+    stats: GestureStats,
     ui_hwnd: isize,
 ) {
     thread::Builder::new()
@@ -62,17 +64,43 @@ pub fn run_worker(
             let mut recognizer = Recognizer::new();
             let mut loaded_user_templates: Vec<UserGestureTemplate> = Vec::new();
             while let Ok(command) = receiver.recv() {
-                let result = match command {
-                    HookCommand::Replay(button) => replay_button(button),
-                    HookCommand::Cancelled => {
-                        logging::info("手势识别", "达到拖动长度但未激活");
-                        Ok(())
+                match command {
+                    HookCommand::Replay {
+                        button,
+                        attempted_samples,
+                    } => {
+                        if let Err(error) = replay_button(button) {
+                            logging::error("重放鼠标按键", &error);
+                            post_toast(ui_hwnd, &format!("操作失败：{error:#}"));
+                        }
+                        if let Some(sample_count) = attempted_samples {
+                            record_gesture(
+                                &stats,
+                                ui_hwnd,
+                                GestureEvent {
+                                    gesture: None,
+                                    action: None,
+                                    outcome: Outcome::TooShort,
+                                    score: None,
+                                    sample_count,
+                                },
+                            );
+                        }
+                    }
+                    HookCommand::Cancelled { sample_count } => {
+                        record_gesture(
+                            &stats,
+                            ui_hwnd,
+                            GestureEvent {
+                                gesture: None,
+                                action: None,
+                                outcome: Outcome::Cancelled,
+                                score: None,
+                                sample_count,
+                            },
+                        );
                     }
                     HookCommand::Stroke(stroke) => {
-                        logging::info(
-                            "手势识别",
-                            format!("开始处理 {} 个采样点", stroke.points.len()),
-                        );
                         let (threshold, user_templates) = {
                             let config = config.read().expect("config poisoned");
                             (config.recognition_threshold, config.custom_gestures.clone())
@@ -82,7 +110,17 @@ pub fn run_worker(
                             loaded_user_templates = user_templates;
                         }
                         let Some(matched) = recognizer.recognize(&stroke.points, threshold) else {
-                            logging::info("手势识别", "未匹配到可靠手势");
+                            record_gesture(
+                                &stats,
+                                ui_hwnd,
+                                GestureEvent {
+                                    gesture: None,
+                                    action: None,
+                                    outcome: Outcome::Unrecognized,
+                                    score: None,
+                                    sample_count: stroke.points.len(),
+                                },
+                            );
                             post_toast(ui_hwnd, "未识别手势");
                             continue;
                         };
@@ -90,24 +128,70 @@ pub fn run_worker(
                             .read()
                             .expect("config poisoned")
                             .action_for(matched.gesture);
-                        logging::info(
-                            "手势识别",
-                            format!(
-                                "轨迹={:?}，动作={action:?}，得分={:.3}",
-                                matched.gesture, matched.score
-                            ),
+                        let result = execute_action(
+                            action,
+                            stroke.target_hwnd,
+                            &config,
+                            &clipboard,
+                            ui_hwnd,
                         );
-                        execute_action(action, stroke.target_hwnd, &config, &clipboard, ui_hwnd)
+                        let outcome = if action == ActionKind::Disabled {
+                            Outcome::Disabled
+                        } else if result.is_ok() {
+                            Outcome::Success
+                        } else {
+                            Outcome::Failed
+                        };
+                        record_gesture(
+                            &stats,
+                            ui_hwnd,
+                            GestureEvent {
+                                gesture: Some(matched.gesture),
+                                action: Some(action),
+                                outcome,
+                                score: Some(matched.score),
+                                sample_count: stroke.points.len(),
+                            },
+                        );
+                        if let Err(error) = result {
+                            let detail = format!("{error:#}");
+                            logging::error("执行手势", &detail);
+                            post_toast(ui_hwnd, &format!("操作失败：{detail}"));
+                        }
                     }
-                };
-                if let Err(error) = result {
-                    let detail = format!("{error:#}");
-                    logging::error("执行手势", &detail);
-                    post_toast(ui_hwnd, &format!("操作失败：{detail}"));
                 }
             }
         })
         .expect("failed to spawn action worker");
+}
+
+fn record_gesture(stats: &GestureStats, ui_hwnd: isize, event: GestureEvent) {
+    logging::info(
+        "手势",
+        format!(
+            "轨迹={} 动作={} 结果={} 得分={} 采样点={}",
+            event
+                .gesture
+                .map(|gesture| format!("{gesture:?}"))
+                .unwrap_or_else(|| "none".to_owned()),
+            event
+                .action
+                .map(|action| format!("{action:?}"))
+                .unwrap_or_else(|| "none".to_owned()),
+            event.outcome.key(),
+            event
+                .score
+                .map(|score| format!("{score:.3}"))
+                .unwrap_or_else(|| "-".to_owned()),
+            event.sample_count,
+        ),
+    );
+    match stats.record(event) {
+        Ok(()) => unsafe {
+            PostMessageW(ui_hwnd as HWND, WM_APP_STATS_UPDATED, 0, 0);
+        },
+        Err(error) => logging::error("手势统计", &error),
+    }
 }
 
 fn execute_action(
@@ -463,14 +547,6 @@ fn send_inputs(inputs: &mut [INPUT], error_message: &str) -> Result<()> {
 fn send_virtual_desktop_switch(direction: u16) -> Result<()> {
     let mut inputs = desktop_switch_inputs(direction);
     send_inputs(&mut inputs, "切换桌面的快捷键被系统拒绝")?;
-    logging::info(
-        "桌面切换",
-        if direction == VK_LEFT {
-            "已注入向左快捷键"
-        } else {
-            "已注入向右快捷键"
-        },
-    );
     Ok(())
 }
 

@@ -37,6 +37,10 @@ pub const IDC_HISTORY_AUTO_PASTE: i32 = 1038;
 pub const IDC_NAV_APPLICATIONS: i32 = 1042;
 pub const IDC_GUARD_ADD_APP: i32 = 1043;
 pub const IDC_GUARD_REMOVE_APP: i32 = 1044;
+pub const IDC_NAV_STATISTICS: i32 = 1045;
+pub const IDC_STATS_DAY: i32 = 1046;
+pub const IDC_STATS_MONTH: i32 = 1047;
+pub const IDC_STATS_YEAR: i32 = 1048;
 
 const SS_RIGHT_STYLE: u32 = 2;
 
@@ -46,6 +50,7 @@ pub enum SettingsPage {
     History,
     Gestures,
     Applications,
+    Statistics,
     Resources,
     About,
 }
@@ -66,6 +71,7 @@ pub struct Controls {
     pub nav_history: HWND,
     pub nav_gestures: HWND,
     pub nav_applications: HWND,
+    pub nav_statistics: HWND,
     pub nav_resources: HWND,
     pub nav_about: HWND,
     pub enabled: HWND,
@@ -86,12 +92,16 @@ pub struct Controls {
     pub resource_working_set: HWND,
     pub resource_gpu: HWND,
     pub resource_details: HWND,
+    pub stats_day: HWND,
+    pub stats_month: HWND,
+    pub stats_year: HWND,
     pub gesture: gesture_settings::Controls,
     pub open_github: HWND,
     pub general_page: Vec<HWND>,
     pub history_page: Vec<HWND>,
     pub gestures_page: Vec<HWND>,
     pub applications_page: Vec<HWND>,
+    pub statistics_page: Vec<HWND>,
     pub resources_page: Vec<HWND>,
     pub about_page: Vec<HWND>,
 }
@@ -107,6 +117,7 @@ impl Default for Controls {
             nav_history: ptr::null_mut(),
             nav_gestures: ptr::null_mut(),
             nav_applications: ptr::null_mut(),
+            nav_statistics: ptr::null_mut(),
             nav_resources: ptr::null_mut(),
             nav_about: ptr::null_mut(),
             enabled: ptr::null_mut(),
@@ -127,12 +138,16 @@ impl Default for Controls {
             resource_working_set: ptr::null_mut(),
             resource_gpu: ptr::null_mut(),
             resource_details: ptr::null_mut(),
+            stats_day: ptr::null_mut(),
+            stats_month: ptr::null_mut(),
+            stats_year: ptr::null_mut(),
             gesture: gesture_settings::Controls::default(),
             open_github: ptr::null_mut(),
             general_page: Vec::new(),
             history_page: Vec::new(),
             gestures_page: Vec::new(),
             applications_page: Vec::new(),
+            statistics_page: Vec::new(),
             resources_page: Vec::new(),
             about_page: Vec::new(),
         }
@@ -186,13 +201,24 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
         42,
         IDC_NAV_APPLICATIONS,
     );
+    controls.nav_statistics = builder.control(
+        "BUTTON",
+        "手势统计",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        0,
+        14,
+        304,
+        162,
+        42,
+        IDC_NAV_STATISTICS,
+    );
     controls.nav_resources = builder.control(
         "BUTTON",
         "资源占用",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
         0,
         14,
-        304,
+        354,
         162,
         42,
         IDC_NAV_RESOURCES,
@@ -203,7 +229,7 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
         0,
         14,
-        354,
+        404,
         162,
         42,
         IDC_NAV_ABOUT,
@@ -227,6 +253,7 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
     let mut history_page = Vec::new();
     let mut gestures_page = Vec::new();
     let mut applications_page = Vec::new();
+    let mut statistics_page = Vec::new();
     let mut resources_page = Vec::new();
     let mut about_page = Vec::new();
 
@@ -484,6 +511,43 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
         22,
     ));
 
+    controls.stats_day = builder.control(
+        "BUTTON",
+        "今日",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        0,
+        232,
+        116,
+        104,
+        40,
+        IDC_STATS_DAY,
+    );
+    statistics_page.push(controls.stats_day);
+    controls.stats_month = builder.control(
+        "BUTTON",
+        "本月",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        0,
+        348,
+        116,
+        104,
+        40,
+        IDC_STATS_MONTH,
+    );
+    statistics_page.push(controls.stats_month);
+    controls.stats_year = builder.control(
+        "BUTTON",
+        "今年",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        0,
+        464,
+        116,
+        104,
+        40,
+        IDC_STATS_YEAR,
+    );
+    statistics_page.push(controls.stats_year);
+
     let cpu_title = builder.label("CPU", 232, 124, 120, 24);
     resources_page.push(cpu_title);
     controls.resource_cpu = builder.label("0.00%", 232, 154, 250, 44);
@@ -598,6 +662,7 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
     controls.history_page = history_page;
     controls.gestures_page = gestures_page;
     controls.applications_page = applications_page;
+    controls.statistics_page = statistics_page;
     controls.resources_page = resources_page;
     controls.about_page = about_page;
     controls

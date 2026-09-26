@@ -7,10 +7,12 @@ use crate::{
     gesture::{GestureId, GestureMatch, Point as GesturePoint, Recognizer, UserGestureTemplate},
     hook::{
         self, HookCommand, UiPoint, UiStrokeBegin, WM_APP_CAPTURE_DONE, WM_APP_OVERLAY_BEGIN,
-        WM_APP_OVERLAY_END, WM_APP_OVERLAY_POINT, WM_APP_SHOW_HISTORY, WM_APP_TOAST, WM_APP_TRAY,
+        WM_APP_OVERLAY_END, WM_APP_OVERLAY_POINT, WM_APP_SHOW_HISTORY, WM_APP_STATS_UPDATED,
+        WM_APP_TOAST, WM_APP_TRAY,
     },
     logging,
     resources::{ProcessUsage, UsageSampler},
+    stats::{GestureStats, Period as StatsPeriod, Snapshot as StatsSnapshot},
     storage::{ClipKind, ClipPayload, Storage},
     ui::{
         format::{format_bytes, format_uptime},
@@ -20,6 +22,7 @@ use crate::{
         history_preview::PreviewImage,
         history_view::{HistoryView, draw_history_item as draw_history_row},
         settings::{self, Controls, Fonts as SettingsFonts, SettingsPage, *},
+        stats_view,
         theme::{
             ACCENT_COLOR, apply_child_theme, apply_window_theme, create_ui_font, palette, rgb,
         },
@@ -97,9 +100,10 @@ use windows_sys::Win32::{
             WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CLIPBOARDUPDATE, WM_CLOSE, WM_COMMAND,
             WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY,
             WM_DRAWITEM, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MEASUREITEM,
-            WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_CAPTION,
-            WS_CLIPCHILDREN, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-            WS_EX_TRANSPARENT, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU,
+            WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_SHOWWINDOW, WM_TIMER,
+            WNDCLASSEXW, WS_CAPTION, WS_CLIPCHILDREN, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+            WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MINIMIZEBOX, WS_OVERLAPPED,
+            WS_POPUP, WS_SYSMENU,
         },
     },
 };
@@ -159,6 +163,9 @@ struct AppState {
     config_path: PathBuf,
     clipboard: ClipboardService,
     storage: Storage,
+    stats: GestureStats,
+    stats_period: StatsPeriod,
+    stats_snapshot: StatsSnapshot,
     capture_sender: Sender<()>,
     controls: Controls,
     overlay_points: Vec<UiPoint>,
@@ -229,6 +236,10 @@ pub fn run() -> Result<()> {
             GetCurrentProcessId()
         }),
     );
+    let stats = GestureStats::new(&root);
+    if let Err(error) = stats.initialize() {
+        logging::error("初始化手势统计", &error);
+    }
     let storage = Storage::open(root, config.clone())?;
     let clipboard = ClipboardService::new(storage.clone(), config.clone());
     let (capture_sender, capture_receiver) = mpsc::channel();
@@ -279,6 +290,9 @@ pub fn run() -> Result<()> {
         config_path,
         clipboard: clipboard.clone(),
         storage: storage.clone(),
+        stats: stats.clone(),
+        stats_period: StatsPeriod::Day,
+        stats_snapshot: StatsSnapshot::default(),
         capture_sender,
         controls: Controls::default(),
         overlay_points: Vec::with_capacity(512),
@@ -411,6 +425,7 @@ pub fn run() -> Result<()> {
         command_receiver,
         unsafe { (*state_pointer).config.clone() },
         clipboard.clone(),
+        stats,
         main_hwnd as isize,
     );
     hook::start(
@@ -835,8 +850,12 @@ unsafe extern "system" fn main_proc(
                     IDC_NAV_HISTORY => show_settings_page(state, SettingsPage::History),
                     IDC_NAV_GESTURES => show_settings_page(state, SettingsPage::Gestures),
                     IDC_NAV_APPLICATIONS => show_settings_page(state, SettingsPage::Applications),
+                    IDC_NAV_STATISTICS => show_settings_page(state, SettingsPage::Statistics),
                     IDC_NAV_RESOURCES => show_settings_page(state, SettingsPage::Resources),
                     IDC_NAV_ABOUT => show_settings_page(state, SettingsPage::About),
+                    IDC_STATS_DAY => set_stats_period(state, StatsPeriod::Day),
+                    IDC_STATS_MONTH => set_stats_period(state, StatsPeriod::Month),
+                    IDC_STATS_YEAR => set_stats_period(state, StatsPeriod::Year),
                     IDC_GUARD_ADD_APP => add_current_application_guard(state),
                     IDC_GUARD_REMOVE_APP => show_application_guard_menu(state),
                     IDC_OPEN_GITHUB => open_github_profile(state),
@@ -891,6 +910,23 @@ unsafe extern "system" fn main_proc(
         WM_APP_CAPTURE_DONE => {
             if let Some(state) = state_mut() {
                 refresh_history_usage(state);
+            }
+            0
+        }
+        WM_APP_STATS_UPDATED => {
+            if let Some(state) = state_mut()
+                && state.active_settings_page == SettingsPage::Statistics
+                && unsafe { IsWindowVisible(state.main_hwnd) } != 0
+            {
+                set_stats_period(state, state.stats_period);
+            }
+            0
+        }
+        WM_SHOWWINDOW if wparam != 0 => {
+            if let Some(state) = state_mut()
+                && state.active_settings_page == SettingsPage::Statistics
+            {
+                set_stats_period(state, state.stats_period);
             }
             0
         }
@@ -1044,8 +1080,9 @@ unsafe extern "system" fn main_proc(
             match draw.CtlID as i32 {
                 IDC_SAVE | IDC_OPEN_HISTORY | IDC_CLEAR_HISTORY | IDC_STATUS | IDC_NAV_GENERAL
                 | IDC_NAV_HISTORY | IDC_NAV_GESTURES | IDC_NAV_APPLICATIONS | IDC_NAV_RESOURCES
-                | IDC_NAV_ABOUT | IDC_OPEN_DATA_DIR | IDC_GESTURE_CLEAR | IDC_GESTURE_BINDING
-                | IDC_OPEN_GITHUB | IDC_GUARD_ADD_APP | IDC_GUARD_REMOVE_APP => {
+                | IDC_NAV_STATISTICS | IDC_NAV_ABOUT | IDC_OPEN_DATA_DIR | IDC_GESTURE_CLEAR
+                | IDC_GESTURE_BINDING | IDC_OPEN_GITHUB | IDC_GUARD_ADD_APP
+                | IDC_GUARD_REMOVE_APP => {
                     draw_button(draw);
                     1
                 }
@@ -1061,7 +1098,8 @@ unsafe extern "system" fn main_proc(
                 }
                 IDC_TRIGGER_RIGHT | IDC_TRIGGER_X1 | IDC_TRIGGER_X2 | IDC_GESTURE_UP
                 | IDC_GESTURE_L | IDC_GESTURE_S | IDC_GESTURE_C | IDC_GESTURE_V
-                | IDC_GESTURE_LEFT | IDC_GESTURE_RIGHT | IDC_GESTURE_SEVEN | IDC_GESTURE_CIRCLE => {
+                | IDC_GESTURE_LEFT | IDC_GESTURE_RIGHT | IDC_GESTURE_SEVEN | IDC_GESTURE_CIRCLE
+                | IDC_STATS_DAY | IDC_STATS_MONTH | IDC_STATS_YEAR => {
                     draw_choice(draw);
                     1
                 }
@@ -1545,6 +1583,18 @@ fn show_settings_page(state: &mut AppState, page: SettingsPage) {
             );
         }
     }
+    for &control in &state.controls.statistics_page {
+        unsafe {
+            ShowWindow(
+                control,
+                if page == SettingsPage::Statistics {
+                    SW_SHOW
+                } else {
+                    SW_HIDE
+                },
+            );
+        }
+    }
     for &control in &state.controls.resources_page {
         unsafe {
             ShowWindow(
@@ -1574,6 +1624,7 @@ fn show_settings_page(state: &mut AppState, page: SettingsPage) {
         SettingsPage::History => ("剪贴板历史", "记录与管理"),
         SettingsPage::Gestures => ("手势设置", "轨迹学习与动作绑定"),
         SettingsPage::Applications => ("应用保护", "全屏与指定应用"),
+        SettingsPage::Statistics => ("手势统计", "日度、月度与年度使用排行"),
         SettingsPage::Resources => ("资源占用", "Xmouse 当前进程"),
         SettingsPage::About => ("关于", "功能、使用与项目"),
     };
@@ -1592,11 +1643,12 @@ fn show_settings_page(state: &mut AppState, page: SettingsPage) {
         InvalidateRect(state.controls.nav_history, ptr::null(), 1);
         InvalidateRect(state.controls.nav_gestures, ptr::null(), 1);
         InvalidateRect(state.controls.nav_applications, ptr::null(), 1);
+        InvalidateRect(state.controls.nav_statistics, ptr::null(), 1);
         InvalidateRect(state.controls.nav_resources, ptr::null(), 1);
         InvalidateRect(state.controls.nav_about, ptr::null(), 1);
         ShowWindow(
             state.controls.save,
-            if page == SettingsPage::About {
+            if matches!(page, SettingsPage::About | SettingsPage::Statistics) {
                 SW_HIDE
             } else {
                 SW_SHOW
@@ -1612,6 +1664,32 @@ fn show_settings_page(state: &mut AppState, page: SettingsPage) {
     }
     if page == SettingsPage::Applications {
         refresh_application_guard_ui(state);
+    }
+    if page == SettingsPage::Statistics {
+        set_stats_period(state, state.stats_period);
+    }
+}
+
+fn set_stats_period(state: &mut AppState, period: StatsPeriod) {
+    state.stats_period = period;
+    for (control, selected) in [
+        (state.controls.stats_day, period == StatsPeriod::Day),
+        (state.controls.stats_month, period == StatsPeriod::Month),
+        (state.controls.stats_year, period == StatsPeriod::Year),
+    ] {
+        set_check(control, selected);
+        redraw_control_without_erase(control);
+    }
+    match state.stats.snapshot(period) {
+        Ok(snapshot) => state.stats_snapshot = snapshot,
+        Err(error) => {
+            logging::error("读取手势统计", &error);
+            state.stats_snapshot = StatsSnapshot::default();
+            post_toast(state.main_hwnd as isize, "读取手势统计失败");
+        }
+    }
+    unsafe {
+        InvalidateRect(state.main_hwnd, ptr::null(), 0);
     }
 }
 
@@ -2242,6 +2320,7 @@ fn refresh_theme_resources(state: &mut AppState) {
         .chain(state.controls.history_page.iter())
         .chain(state.controls.gestures_page.iter())
         .chain(state.controls.applications_page.iter())
+        .chain(state.controls.statistics_page.iter())
         .chain(state.controls.resources_page.iter())
         .chain(state.controls.about_page.iter())
         .copied()
@@ -2253,6 +2332,7 @@ fn refresh_theme_resources(state: &mut AppState) {
             state.controls.nav_history,
             state.controls.nav_gestures,
             state.controls.nav_applications,
+            state.controls.nav_statistics,
             state.controls.nav_resources,
             state.controls.nav_about,
             state.controls.save,
@@ -2995,6 +3075,11 @@ fn paint_main_window(hwnd: HWND) {
         SettingsPage::History => &[(214, 100, 858, 246, 18), (214, 260, 858, 426, 18)],
         SettingsPage::Gestures => &[(214, 100, 858, 270, 18), (214, 278, 858, 632, 18)],
         SettingsPage::Applications => &[(214, 100, 858, 246, 18), (214, 270, 858, 590, 18)],
+        SettingsPage::Statistics => &[
+            (214, 100, 858, 174, 18),
+            (214, 184, 858, 278, 18),
+            (214, 296, 858, 630, 18),
+        ],
         SettingsPage::Resources => &[
             (214, 104, 522, 244, 18),
             (536, 104, 858, 244, 18),
@@ -3010,6 +3095,16 @@ fn paint_main_window(hwnd: HWND) {
     };
     for &(left, top, right, bottom, radius) in cards {
         widgets::rounded_panel(hdc, left, top, right, bottom, radius, colors);
+    }
+
+    if state.active_settings_page == SettingsPage::Statistics {
+        stats_view::draw(
+            hdc,
+            colors,
+            state.font_body,
+            state.font_title,
+            &state.stats_snapshot,
+        );
     }
 
     if state.active_settings_page == SettingsPage::Gestures {
@@ -3082,6 +3177,7 @@ fn draw_button(draw: &DRAWITEMSTRUCT) {
             | (IDC_NAV_HISTORY, SettingsPage::History)
             | (IDC_NAV_GESTURES, SettingsPage::Gestures)
             | (IDC_NAV_APPLICATIONS, SettingsPage::Applications)
+            | (IDC_NAV_STATISTICS, SettingsPage::Statistics)
             | (IDC_NAV_RESOURCES, SettingsPage::Resources)
             | (IDC_NAV_ABOUT, SettingsPage::About)
     );
@@ -3093,6 +3189,7 @@ fn draw_button(draw: &DRAWITEMSTRUCT) {
             | IDC_NAV_HISTORY
             | IDC_NAV_GESTURES
             | IDC_NAV_APPLICATIONS
+            | IDC_NAV_STATISTICS
             | IDC_NAV_RESOURCES
             | IDC_NAV_ABOUT
     ) {
@@ -3113,6 +3210,7 @@ fn draw_button(draw: &DRAWITEMSTRUCT) {
             | IDC_NAV_HISTORY
             | IDC_NAV_GESTURES
             | IDC_NAV_APPLICATIONS
+            | IDC_NAV_STATISTICS
             | IDC_NAV_RESOURCES
             | IDC_NAV_ABOUT
     ) {

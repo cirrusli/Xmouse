@@ -45,6 +45,7 @@ try {
     $hashes | Set-Content -LiteralPath (Join-Path $staging 'SHA256SUMS.txt') -Encoding ascii
     Write-Host "Verified package: $staging"
     Write-Host 'Promote the Xmouse directory to latest only after stopping the installed instance; archive the previous release first.'
+    [PSCustomObject]@{ Version = $version; Directory = $staging; PortableZip = $zip; SourceZip = $source }
 }
 finally {
     Pop-Location

@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -37,15 +38,15 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run Clippy
-        run: cargo clippy --release --all-targets -- -D warnings
+        run: cargo clippy --locked --release --all-targets -- -D warnings
 
       - name: Run release tests
-        run: cargo test --release
+        run: cargo test --locked --release
 
       - name: Verify standalone release executable
         shell: pwsh
         run: |
-          cargo build --release
+          cargo build --locked --release
           if ($LASTEXITCODE -ne 0) { throw 'Release build failed' }
           ./scripts/verify-portable.ps1
 

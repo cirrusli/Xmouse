@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  quality:
+    uses: ./.github/workflows/quality.yml
+
+  publish:
+    needs: quality
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate release tag and main ancestry
+        shell: pwsh
+        run: |
+          $manifest = Get-Content Cargo.toml -Raw
+          $version = [regex]::Match($manifest, '(?m)^version = "([0-9]+\.[0-9]+\.[0-9]+)"').Groups[1].Value
+          if ($env:GITHUB_REF_TYPE -ne 'tag' -or $env:GITHUB_REF_NAME -ne "v$version") {
+            throw 'Release tag must match Cargo.toml exactly'
+          }
+          git merge-base --is-ancestor HEAD origin/main
+          if ($LASTEXITCODE -ne 0) { throw 'Release commit must be merged into main first' }
+
+      - name: Configure MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build and package standalone release
+        id: package
+        shell: pwsh
+        run: |
+          cargo build --locked --release
+          if ($LASTEXITCODE -ne 0) { throw 'Release build failed' }
+          $package = ./scripts/package.ps1
+          "directory=$($package.Directory)" >> $env:GITHUB_OUTPUT
+          "version=$($package.Version)" >> $env:GITHUB_OUTPUT
+
+      - name: Upload verified packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: xmouse-release-${{ steps.package.outputs.version }}
+          path: |
+            ${{ steps.package.outputs.directory }}/*.zip
+            ${{ steps.package.outputs.directory }}/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_DIRECTORY: ${{ steps.package.outputs.directory }}
+          RELEASE_VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $notes = "docs/RELEASE-NOTES-$($env:RELEASE_VERSION).md"
+          $existing = gh release view $tag --json isDraft 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            if (-not ($existing | ConvertFrom-Json).isDraft) {
+              throw 'This release is already public; do not overwrite published artifacts'
+            }
+          } else {
+            gh release create $tag --draft --verify-tag --title "Xmouse $tag" --notes-file $notes
+            if ($LASTEXITCODE -ne 0) { throw 'Draft release creation failed' }
+          }
+          $files = @(Get-ChildItem -LiteralPath $env:RELEASE_DIRECTORY -File | Where-Object { $_.Extension -eq '.zip' -or $_.Name -eq 'SHA256SUMS.txt' } | ForEach-Object FullName)
+          if ($files.Count -ne 3) { throw 'Expected portable ZIP, source ZIP and SHA-256 manifest' }
+          gh release upload $tag @files --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Asset upload failed; release remains a draft' }
+          gh release edit $tag --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }

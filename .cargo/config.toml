@@ -1,0 +1,4 @@
+# The portable MSVC build must not require the VC++ Redistributable.
+# cc-rs also observes this target feature when compiling bundled SQLite.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

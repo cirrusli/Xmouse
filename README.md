@@ -109,6 +109,8 @@ cargo build --release
 
 提交源码并通过质量检查后，运行 `scripts\package.ps1` 在 `work` 下生成单 EXE 便携包、对应 HEAD 的源码包及 SHA-256 清单；脚本不覆盖正在运行的版本。归档旧包后再更新 `latest` 和 `outputs`。
 
+正式 GitHub 发布：先等 PR 的 Quality 检查通过，再合入 `main`；main 检查通过后，为该提交创建与 Cargo 版本一致的 `vX.Y.Z` 标签。Release 流水线再次运行质量门禁，使用静态 CRT 的 MSVC 构建并自检，生成便携 ZIP、源码 ZIP 和 SHA-256 清单后发布。只推送开发分支不代表已合并或发布。
+
 Release 可执行文件位于 `target\release\xmouse.exe`。`--self-test` 在加载用户数据、窗口和钩子之前完成内存数据库读写与完整性自检；发布检查还会验证 PE 导入并在独立中文/空格目录中运行单 EXE。当前版本说明见 `docs\RELEASE-NOTES-0.16.0.md`，完整变更历史见 `CHANGELOG.md`。
 
 首次启动会打开设置页并创建托盘图标。关闭设置页只会隐藏窗口；需要从托盘菜单选择“退出 Xmouse”结束进程。

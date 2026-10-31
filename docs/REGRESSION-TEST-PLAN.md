@@ -197,6 +197,8 @@
 | PKG-003 | P0 | 便携 ZIP 解压冷启动成功，EXE 与 `latest` 哈希一致 | 发布检查 |
 | PKG-004 | P0 | SHA-256 文件逐项验证，源码标签与 `main` 对应 | 发布检查 |
 | PKG-005 | P0 | 只复制 EXE 到全新中文/空格目录；`--self-test` 成功且不打开窗口、不注册钩子、不改用户数据 | 本地脚本 + MSVC CI |
+| PKG-006 | P0 | MSVC 构建启用静态 CRT，PE 不依赖 `VCRUNTIME140.dll`；不能用 GNU 本地通过代替 MSVC CI 结果，不能移除检查绕过失败 | MSVC CI 独立 EXE 自检 |
+| PKG-007 | P0 | 合并前 PR CI 全绿；main CI 全绿后打匹配 Cargo 版本的标签；Release 再跑相同质量门禁并检查 main 祖先关系，上传两个 ZIP 和校验清单后才公开草稿 | GitHub 发布流水线 + 发布后核对 |
 
 ## 12. 后续自动化补强顺序
 

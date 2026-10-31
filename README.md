@@ -2,7 +2,7 @@
 
 Xmouse 是面向 Windows 10/11 x64 的轻量鼠标手势与剪贴板历史工具。它使用 Rust 和原生 Win32 API，不包含 WebView 或托管 UI 运行时。
 
-当前版本：**0.15.1**
+当前版本：**0.15.2**
 
 作者：[cirrusli](https://github.com/cirrusli) · 项目地址：[github.com/cirrusli/Xmouse](https://github.com/cirrusli/Xmouse)
 
@@ -10,7 +10,7 @@ Xmouse 是面向 Windows 10/11 x64 的轻量鼠标手势与剪贴板历史工具
 
 双击根目录的 `启动 Xmouse.cmd`。脚本会从 `latest\Xmouse.exe` 启动当前最新版。
 
-便携版也可以直接解压 `outputs\Xmouse-0.15.1-windows-x64.zip` 后运行 `Xmouse.exe`。请保留 `sqlite3.dll` 与程序在同一目录。
+便携版也可以直接解压 `outputs\Xmouse-0.15.2-windows-x64.zip` 后运行 `Xmouse.exe`。请保留 `sqlite3.dll` 与程序在同一目录。
 
 ## 目录结构
 
@@ -32,7 +32,8 @@ Xmouse 是面向 Windows 10/11 x64 的轻量鼠标手势与剪贴板历史工具
 - 工程架构与模块边界：`docs\ARCHITECTURE.md`
 - 代码现状、性能瓶颈和下一阶段优先级：`docs\CURRENT-STATE-AND-ROADMAP.md`
 - 持续回归清单与变更影响映射：`docs\REGRESSION-TEST-PLAN.md`
-- 当前版本说明：`docs\RELEASE-NOTES-0.15.1.md`
+- 当前版本说明：`docs\RELEASE-NOTES-0.15.2.md`
+- 外部评审与迭代验收：`docs\TECHNICAL-REVIEW-2026-10-31.md`
 - 完整版本历史：`CHANGELOG.md`
 
 ## 默认手势
@@ -40,7 +41,7 @@ Xmouse 是面向 Windows 10/11 x64 的轻量鼠标手势与剪贴板历史工具
 | 手势 | 动作 |
 | --- | --- |
 | ↑ | 切换鼠标下窗口的置顶状态 |
-| L | 向目标窗口发送 `Ctrl+W`；Wallpaper UI 使用标准窗口关闭消息 |
+| L | 向目标窗口发送 `Ctrl+W`；Steam 和 Wallpaper UI 使用标准窗口关闭消息 |
 | S | 搜索选中文本并恢复原剪贴板 |
 | C | 向目标窗口发送 `Ctrl+C` |
 | V | 打开剪贴板历史 |
@@ -102,6 +103,6 @@ cargo build --release
 
 每次变更建议运行 `scripts\quality.ps1`；剪贴板相关变更运行 `scripts\quality.ps1 -ClipboardRoundTrip`。GitHub Actions 还会检查测试数量、Clippy、Release 测试并生成覆盖率报告。完整必测项见 `docs\REGRESSION-TEST-PLAN.md`。
 
-Release 可执行文件位于 `target\release\xmouse.exe`。当前版本说明见 `docs\RELEASE-NOTES-0.15.1.md`，完整变更历史见 `CHANGELOG.md`。
+Release 可执行文件位于 `target\release\xmouse.exe`。当前版本说明见 `docs\RELEASE-NOTES-0.15.2.md`，完整变更历史见 `CHANGELOG.md`。
 
 首次启动会打开设置页并创建托盘图标。关闭设置页只会隐藏窗口；需要从托盘菜单选择“退出 Xmouse”结束进程。

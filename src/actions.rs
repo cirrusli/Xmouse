@@ -369,11 +369,19 @@ fn close_tab_or_compatible_window(target: HWND, ui_hwnd: isize) -> Result<()> {
     if target.is_null() || unsafe { IsWindow(target) } == 0 {
         bail!("目标窗口已经关闭");
     }
-    if let Some(close_target) = wallpaper_ui_close_target(target) {
+    let root = window_ancestor_or_self(target, GA_ROOT);
+    let steam_target = window_process_id(root)
+        .and_then(process_name)
+        .is_some_and(|name| is_steam_ui_process_name(&name))
+        .then_some(root);
+    let native_target = steam_target
+        .map(|window| (window, "Steam"))
+        .or_else(|| wallpaper_ui_close_target(target).map(|window| (window, "Wallpaper UI")));
+    if let Some((close_target, app_name)) = native_target {
         if unsafe { PostMessageW(close_target, WM_CLOSE, 0, 0) } == 0 {
-            bail!("Wallpaper UI 拒绝了关闭请求");
+            bail!("{app_name} 拒绝了关闭请求");
         }
-        post_toast(ui_hwnd, "已关闭 Wallpaper UI");
+        post_toast(ui_hwnd, &format!("已请求关闭 {app_name} 窗口"));
         return Ok(());
     }
 
@@ -398,6 +406,13 @@ fn wallpaper_ui_close_target(target: HWND) -> Option<HWND> {
 
 fn is_wallpaper_ui_process_name(name: &str) -> bool {
     name.eq_ignore_ascii_case("wallpaperui.exe")
+}
+
+fn is_steam_ui_process_name(name: &str) -> bool {
+    // Modern Steam's visible windows belong to steamwebhelper.exe. Close
+    // only the current root window: an owned chat/settings popup must not
+    // redirect the request to Steam's main window or terminate a game.
+    name.eq_ignore_ascii_case("steam.exe") || name.eq_ignore_ascii_case("steamwebhelper.exe")
 }
 
 fn windows_share_input_target(target: HWND, foreground: HWND) -> bool {
@@ -725,8 +740,8 @@ fn wide(value: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ctrl_key_inputs, desktop_switch_inputs, is_wallpaper_ui_process_name, keyboard_input,
-        windows_share_input_target,
+        ctrl_key_inputs, desktop_switch_inputs, is_steam_ui_process_name,
+        is_wallpaper_ui_process_name, keyboard_input, windows_share_input_target,
     };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, VK_LEFT, VK_LWIN, VK_RIGHT,
@@ -802,5 +817,24 @@ mod tests {
         assert!(is_wallpaper_ui_process_name("WallpaperUI.EXE"));
         assert!(!is_wallpaper_ui_process_name("wallpaper64.exe"));
         assert!(!is_wallpaper_ui_process_name("msedge.exe"));
+    }
+
+    #[test]
+    fn steam_native_close_is_limited_to_client_ui_processes() {
+        assert!(is_steam_ui_process_name("Steam.exe"));
+        assert!(is_steam_ui_process_name("steamwebhelper.EXE"));
+        for name in [
+            "steamservice.exe",
+            "GameOverlayUI.exe",
+            "steamwebhelper.exe.bak",
+            "GTA5.exe",
+            "msedge.exe",
+            "notepad.exe",
+        ] {
+            assert!(
+                !is_steam_ui_process_name(name),
+                "unexpected Steam rule for {name}"
+            );
+        }
     }
 }

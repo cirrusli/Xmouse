@@ -31,13 +31,13 @@ use windows_sys::Win32::{
             MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
         },
         WindowsAndMessaging::{
-            CallNextHookEx, EVENT_SYSTEM_FOREGROUND, GA_ROOT, GetAncestor, GetClassNameW,
-            GetForegroundWindow, GetMessageW, GetShellWindow, GetWindowRect,
-            GetWindowThreadProcessId, HHOOK, IsIconic, IsZoomed, KillTimer, LLMHF_INJECTED, MSG,
-            MSLLHOOKSTRUCT, PostMessageW, PostThreadMessageW, SetTimer, SetWindowsHookExW,
-            UnhookWindowsHookEx, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
-            WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER, WM_XBUTTONDOWN, WM_XBUTTONUP,
-            WindowFromPoint,
+            CallNextHookEx, EVENT_SYSTEM_FOREGROUND, GA_ROOT, GWL_STYLE, GetAncestor,
+            GetClassNameW, GetForegroundWindow, GetMessageW, GetShellWindow, GetWindowLongPtrW,
+            GetWindowRect, GetWindowThreadProcessId, HHOOK, IsIconic, IsZoomed, KillTimer,
+            LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, PostMessageW, PostThreadMessageW, SetTimer,
+            SetWindowsHookExW, UnhookWindowsHookEx, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT,
+            WINEVENT_SKIPOWNPROCESS, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER,
+            WM_XBUTTONDOWN, WM_XBUTTONUP, WS_CAPTION, WindowFromPoint,
         },
     },
 };
@@ -885,7 +885,16 @@ fn is_fullscreen_target(hwnd: HWND) -> bool {
         return false;
     }
 
-    rect_covers_monitor(window_rect, monitor_info.rcMonitor, 8)
+    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
+    is_fullscreen_window(style, window_rect, monitor_info.rcMonitor)
+}
+
+fn is_fullscreen_window(style: u32, window: RECT, monitor: RECT) -> bool {
+    // IsZoomed is false for a restored browser stretched over a monitor.
+    // Its conventional title bar still identifies an ordinary framed window;
+    // monitor coverage alone must not disable gestures there. Test the full
+    // WS_CAPTION mask: a border-only popup is still eligible for game protection.
+    style & WS_CAPTION != WS_CAPTION && rect_covers_monitor(window, monitor, 8)
 }
 
 fn rect_covers_monitor(window: RECT, monitor: RECT, tolerance: i32) -> bool {
@@ -989,8 +998,9 @@ mod tests {
     use super::{
         Candidate, GesturePoint, HookCommand, HookContext, HookState, INJECTED_EVENT_TOKEN, RECT,
         UiPoint, WM_APP_OVERLAY_END, attempted_gesture, cancel_session, gesture_committed,
-        is_system_shell_class, note_release, recover_session, rect_covers_monitor,
-        should_ignore_mouse_event, start_session_watchdog, stop_session_watchdog, stroke_ui_points,
+        is_fullscreen_window, is_system_shell_class, note_release, recover_session,
+        rect_covers_monitor, should_ignore_mouse_event, start_session_watchdog,
+        stop_session_watchdog, stroke_ui_points,
     };
     use crate::{
         config::{AppConfig, TriggerButton},
@@ -1008,7 +1018,7 @@ mod tests {
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DestroyWindow, HWND_MESSAGE, LLMHF_INJECTED, MSG, PM_REMOVE, PeekMessageW,
-        WM_TIMER,
+        WM_TIMER, WS_CAPTION,
     };
 
     #[test]
@@ -1296,6 +1306,88 @@ mod tests {
             monitor,
             8,
         ));
+    }
+
+    #[test]
+    fn restored_edge_with_monitor_sized_bounds_is_not_fullscreen() {
+        // Captured from the user's normal Edge window: not IsZoomed, but
+        // the old one-sided geometry predicate still covered the monitor.
+        let monitor = RECT {
+            left: 0,
+            top: 0,
+            right: 2560,
+            bottom: 1440,
+        };
+        let edge = RECT {
+            left: 2,
+            top: 2,
+            right: 2578,
+            bottom: 1458,
+        };
+        assert!(rect_covers_monitor(edge, monitor, 8));
+        assert!(!is_fullscreen_window(0x16CF_0000, edge, monitor));
+    }
+
+    #[test]
+    fn framed_windows_are_not_fullscreen_even_with_exact_or_oversized_bounds() {
+        let monitor = RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        for bounds in [
+            monitor,
+            RECT {
+                left: -8,
+                top: -8,
+                right: 1928,
+                bottom: 1088,
+            },
+        ] {
+            assert!(!is_fullscreen_window(WS_CAPTION, bounds, monitor));
+            assert!(!is_fullscreen_window(
+                WS_CAPTION | 0x8000_0000,
+                bounds,
+                monitor
+            ));
+        }
+    }
+
+    #[test]
+    fn borderless_games_remain_protected_on_scaled_and_negative_origin_monitors() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{WS_BORDER, WS_POPUP, WS_THICKFRAME};
+        for monitor in [
+            RECT {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            },
+            RECT {
+                left: -3840,
+                top: -1080,
+                right: 0,
+                bottom: 1080,
+            },
+            RECT {
+                left: 2560,
+                top: 0,
+                right: 6400,
+                bottom: 2160,
+            },
+        ] {
+            for style in [0, WS_POPUP, WS_POPUP | WS_THICKFRAME, WS_POPUP | WS_BORDER] {
+                assert!(is_fullscreen_window(style, monitor, monitor));
+                let overscan = RECT {
+                    left: monitor.left - 8,
+                    top: monitor.top - 8,
+                    right: monitor.right + 8,
+                    bottom: monitor.bottom + 8,
+                };
+                assert!(is_fullscreen_window(style, overscan, monitor));
+            }
+        }
     }
 
     #[test]

@@ -491,7 +491,7 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
     let applications_title = builder.label("指定应用", 232, 292, 180, 26);
     set_control_font(applications_title, fonts.section);
     applications_page.push(applications_title);
-    controls.gesture_guard_target = builder.label("当前应用：未获取", 232, 334, 580, 24);
+    controls.gesture_guard_target = builder.label("最近活跃应用：未获取", 232, 334, 580, 24);
     applications_page.push(controls.gesture_guard_target);
     let add_application = builder.control(
         "BUTTON",
@@ -517,7 +517,7 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
         IDC_GUARD_REMOVE_APP,
     );
     applications_page.push(remove_application);
-    controls.gesture_guard_summary = builder.label("尚未指定应用", 232, 448, 580, 74);
+    controls.gesture_guard_summary = builder.label("未禁用任何应用", 232, 448, 580, 74);
     applications_page.push(controls.gesture_guard_summary);
     controls.close_rule = builder.control(
         "BUTTON",

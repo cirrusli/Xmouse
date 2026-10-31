@@ -2,7 +2,7 @@
 
 Xmouse 是面向 Windows 10/11 x64 的轻量鼠标手势与剪贴板历史工具。它使用 Rust 和原生 Win32 API，不包含 WebView 或托管 UI 运行时。
 
-当前版本：**0.16.0**
+当前版本：**0.16.1**
 
 作者：[cirrusli](https://github.com/cirrusli) · 项目地址：[github.com/cirrusli/Xmouse](https://github.com/cirrusli/Xmouse)
 
@@ -10,7 +10,7 @@ Xmouse 是面向 Windows 10/11 x64 的轻量鼠标手势与剪贴板历史工具
 
 双击根目录的 `启动 Xmouse.cmd`。脚本会从 `latest\Xmouse.exe` 启动当前最新版。
 
-便携版也可以直接解压 `outputs\Xmouse-0.16.0-windows-x64.zip` 后运行 `Xmouse.exe`。SQLite 已静态链接，单独移动 EXE 也可运行，无需附带 DLL。
+便携版也可以直接解压 `outputs\Xmouse-0.16.1-windows-x64.zip` 后运行 `Xmouse.exe`。SQLite 已静态链接，单独移动 EXE 也可运行，无需附带 DLL。
 
 ## 目录结构
 
@@ -32,7 +32,7 @@ Xmouse 是面向 Windows 10/11 x64 的轻量鼠标手势与剪贴板历史工具
 - 工程架构与模块边界：`docs\ARCHITECTURE.md`
 - 代码现状、性能瓶颈和下一阶段优先级：`docs\CURRENT-STATE-AND-ROADMAP.md`
 - 持续回归清单与变更影响映射：`docs\REGRESSION-TEST-PLAN.md`
-- 当前版本说明：`docs\RELEASE-NOTES-0.16.0.md`
+- 当前版本说明：`docs\RELEASE-NOTES-0.16.1.md`
 - 外部评审与迭代验收：`docs\TECHNICAL-REVIEW-2026-10-31.md`
 - 完整版本历史：`CHANGELOG.md`
 
@@ -53,6 +53,8 @@ Xmouse 是面向 Windows 10/11 x64 的轻量鼠标手势与剪贴板历史工具
 右键是默认触发键，也可以在设置中改为 X1/X2 侧键。普通短按会被重放，仍可使用正常右键菜单；轨迹过短时也按普通单击处理，不再弹出“手势太快”提示。
 
 “应用保护”页支持两层规则：默认对覆盖整块显示器的全屏窗口暂停手势，也可以把最近活跃窗口对应的 EXE 加入禁用名单。关闭全屏总开关后可只保护指定游戏；规则命中时 Xmouse 完全放行原始鼠标输入。
+
+普通带标题栏的大窗口不会仅因覆盖屏幕被判为全屏，包括恢复后略超出屏幕的 Edge 窗口；无边框全屏仍受保护。页面中的“最近活跃应用”是待配置的目标，不代表它已被禁用；空名单会明确显示“未禁用任何应用”。
 
 该页还可为当前应用设置 L 关闭规则：自动兼容、发送 Ctrl+W、关闭当前窗口。修改后保存生效；选择“自动兼容”可移除自定义规则。窗口关闭使用标准 `WM_CLOSE`，由应用决定关闭、询问保存或收回托盘，不强杀进程。
 
@@ -111,6 +113,6 @@ cargo build --release
 
 正式 GitHub 发布：先等 PR 的 Quality 检查通过，再合入 `main`；main 检查通过后，为该提交创建与 Cargo 版本一致的 `vX.Y.Z` 标签。Release 流水线再次运行质量门禁，使用静态 CRT 的 MSVC 构建并自检，生成便携 ZIP、源码 ZIP 和 SHA-256 清单后发布。只推送开发分支不代表已合并或发布。
 
-Release 可执行文件位于 `target\release\xmouse.exe`。`--self-test` 在加载用户数据、窗口和钩子之前完成内存数据库读写与完整性自检；发布检查还会验证 PE 导入并在独立中文/空格目录中运行单 EXE。当前版本说明见 `docs\RELEASE-NOTES-0.16.0.md`，完整变更历史见 `CHANGELOG.md`。
+Release 可执行文件位于 `target\release\xmouse.exe`。`--self-test` 在加载用户数据、窗口和钩子之前完成内存数据库读写与完整性自检；发布检查还会验证 PE 导入并在独立中文/空格目录中运行单 EXE。当前版本说明见 `docs\RELEASE-NOTES-0.16.1.md`，完整变更历史见 `CHANGELOG.md`。
 
 首次启动会打开设置页并创建托盘图标。关闭设置页只会隐藏窗口；需要从托盘菜单选择“退出 Xmouse”结束进程。

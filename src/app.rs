@@ -1961,13 +1961,13 @@ fn external_application_name() -> Option<String> {
 
 fn refresh_application_guard_ui(state: &AppState) {
     let target = external_application_name()
-        .map(|name| format!("当前应用：{name}"))
-        .unwrap_or_else(|| "当前应用：未获取".to_owned());
+        .map(|name| format!("最近活跃应用：{name}"))
+        .unwrap_or_else(|| "最近活跃应用：未获取".to_owned());
     set_control_text(state.controls.gesture_guard_target, &target);
 
     let exclusions = &state.pending_gesture_guard.excluded_processes;
     let summary = if exclusions.is_empty() {
-        "尚未指定应用".to_owned()
+        "未禁用任何应用".to_owned()
     } else {
         let visible = exclusions
             .iter()
@@ -1982,6 +1982,12 @@ fn refresh_application_guard_ui(state: &AppState) {
         }
     };
     set_control_text(state.controls.gesture_guard_summary, &summary);
+    unsafe {
+        EnableWindow(
+            GetDlgItem(state.main_hwnd, IDC_GUARD_REMOVE_APP),
+            (!exclusions.is_empty()) as i32,
+        );
+    }
     if let Some(process) = external_application_name() {
         let policy = window_rules::resolve(&process, &state.pending_close_rules);
         let custom = state

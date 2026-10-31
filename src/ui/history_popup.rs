@@ -1,13 +1,14 @@
 use super::{
-    native::{ControlFactory, round_control, set_control_font},
+    native::{ControlFactory, round_control, set_accessible_name, set_control_font},
     settings::Fonts,
     theme::apply_child_theme,
 };
 use windows_sys::Win32::{
     Foundation::{HWND, LPARAM},
     UI::WindowsAndMessaging::{
-        BS_OWNERDRAW, ES_AUTOHSCROLL, LB_SETITEMHEIGHT, LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT,
-        LBS_NOTIFY, LBS_OWNERDRAWFIXED, SendMessageW, WS_CHILD, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+        BS_OWNERDRAW, BS_RADIOBUTTON, ES_AUTOHSCROLL, LB_SETITEMHEIGHT, LBS_HASSTRINGS,
+        LBS_NOINTEGRALHEIGHT, LBS_NOTIFY, LBS_OWNERDRAWFIXED, SendMessageW, WS_CHILD, WS_GROUP,
+        WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
     },
 };
 
@@ -102,6 +103,8 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts, dark: bool) -> Controls {
     }
     apply_child_theme(search, dark);
     apply_child_theme(list, dark);
+    set_accessible_name(search, "搜索剪贴板内容或来源程序");
+    set_accessible_name(list, "剪贴板历史记录");
 
     Controls {
         search,
@@ -122,7 +125,19 @@ fn filter_button(builder: &ControlFactory, text: &str, x: i32, width: i32, id: i
     builder.control(
         "BUTTON",
         text,
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        WS_CHILD
+            | WS_VISIBLE
+            | WS_TABSTOP
+            | if matches!(id, IDC_HISTORY_FILTER_ALL | IDC_HISTORY_FILTER_SOURCE) {
+                WS_GROUP
+            } else {
+                0
+            }
+            | if id == IDC_HISTORY_FILTER_SOURCE {
+                BS_OWNERDRAW as u32
+            } else {
+                BS_RADIOBUTTON as u32
+            },
         0,
         x,
         150,

@@ -11,6 +11,7 @@ flowchart LR
     App --> Hook["hook.rs · 鼠标状态机"]
     App --> Actions["actions.rs · 动作执行"]
     Actions --> ActionModel["action.rs · 安全动作模型"]
+    Actions --> WindowRules["window_rules.rs · 应用关闭策略"]
     App --> Clipboard["clipboard.rs · 剪贴板适配"]
     Clipboard --> Storage["storage.rs · SQLite/媒体"]
     Hook --> Gesture["gesture.rs · 轨迹识别"]
@@ -33,16 +34,18 @@ flowchart LR
 | `ui/history_view.rs` | 历史行与缩略图渲染 | 全局状态和窗口消息处理 |
 | `ui/widgets.rs` | 可复用自绘控件与深色弹出菜单项 | 特定页面业务逻辑 |
 | `ui/theme.rs` | 配色、字体、DWM/子控件主题 | 页面布局 |
-| `ui/native.rs` | HWND 控件创建和公共原生操作 | 业务命令 |
+| `ui/native.rs` | HWND 控件创建、原生 checkbox/radio 语义、自绘子类桥接和可访问名称 | 业务命令 |
 | `storage.rs` | schema、迁移、查询、去重、置顶和淘汰 | UI 文案与窗口操作 |
 | `gesture.rs` | 轨迹 ID、模板、个人样本归一化和识别 | 具体动作执行 |
 | `action.rs` | 有限安全动作枚举与用户文案 | `SendInput`、窗口句柄和 UI 状态 |
 | `actions.rs` | 轨迹绑定解析后的目标验证与动作执行 | 手势形状识别和任意脚本 |
+| `window_rules.rs` | 纯数据的应用关闭规则解析、默认兼容、覆盖/撤销与校验 | HWND 操作、UI、强杀进程 |
+| `self_test.rs` | 发布件启动前数据库自检 | 真实用户数据、窗口和钩子 |
 | `autostart.rs` | 提权助手、最高权限登录任务和旧启动项迁移 | UI 状态、手势与剪贴板业务 |
 | `stats.rs` | 手势事件存储、日/月/年聚合和排行 | 鼠标坐标、剪贴板正文和 UI 绘制 |
 | `gesture_lifecycle.rs` | 手势结束宽限、最长存活时间和轨迹消息会话隔离 | Win32 调用、动作执行 |
 | `raw_mouse.rs` | 原始鼠标释放信号与逻辑触发键映射 | 轨迹采样、鼠标拦截和持久化 |
-| `ui/stats_view.rs` | 统计页数值、排行条形图绘制 | 数据库查询和事件写入 |
+| `ui/stats_view.rs` | 真实列表控件中每一行排行的条形图绘制 | 数据库查询和事件写入 |
 
 依赖方向保持为 `app → ui/domain services`。纯绘制函数通过参数接收主题、字体和视图数据，不读取 `AppState`；这样可以独立调整页面而不影响钩子与存储线程。
 

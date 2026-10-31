@@ -4,13 +4,14 @@ use windows_sys::Win32::{
     Foundation::{COLORREF, HWND, RECT, SIZE},
     Graphics::Gdi::{
         CreatePen, CreateSolidBrush, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE,
-        DT_VCENTER, DeleteObject, DrawTextW, Ellipse, FillRect, GetDC, GetTextExtentPoint32W,
-        HFONT, LineTo, MoveToEx, PS_SOLID, ReleaseDC, RoundRect, SelectObject, SetBkMode,
-        SetTextColor, TRANSPARENT,
+        DT_VCENTER, DeleteObject, DrawFocusRect, DrawTextW, Ellipse, FillRect, GetDC,
+        GetTextExtentPoint32W, HFONT, LineTo, MoveToEx, PS_SOLID, ReleaseDC, RoundRect,
+        SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
     },
     UI::{
         Controls::{
-            DRAWITEMSTRUCT, MEASUREITEMSTRUCT, ODS_DISABLED, ODS_HOTLIGHT, ODS_SELECTED, ODT_MENU,
+            DRAWITEMSTRUCT, MEASUREITEMSTRUCT, ODS_DISABLED, ODS_FOCUS, ODS_HOTLIGHT,
+            ODS_NOFOCUSRECT, ODS_SELECTED, ODT_MENU,
         },
         WindowsAndMessaging::{GetWindowTextLengthW, GetWindowTextW},
     },
@@ -41,6 +42,20 @@ pub enum ButtonRole {
     Primary,
     Danger,
     Secondary,
+}
+
+fn draw_keyboard_focus(draw: &DRAWITEMSTRUCT) {
+    if draw.itemState & ODS_FOCUS != 0 && draw.itemState & ODS_NOFOCUSRECT == 0 {
+        let rect = RECT {
+            left: draw.rcItem.left + 5,
+            top: draw.rcItem.top + 4,
+            right: draw.rcItem.right - 5,
+            bottom: draw.rcItem.bottom - 4,
+        };
+        unsafe {
+            DrawFocusRect(draw.hDC, &rect);
+        }
+    }
 }
 
 pub fn rounded_panel(
@@ -191,6 +206,7 @@ pub fn draw_button(
         DrawTextW(draw.hDC, text.as_ptr(), -1, &mut text_rect, text_flags);
         SelectObject(draw.hDC, old_font);
     }
+    draw_keyboard_focus(draw);
 }
 
 pub fn draw_toggle(draw: &DRAWITEMSTRUCT, colors: Palette, font: HFONT, checked: bool) {
@@ -276,6 +292,7 @@ pub fn draw_toggle(draw: &DRAWITEMSTRUCT, colors: Palette, font: HFONT, checked:
         );
         SelectObject(draw.hDC, old_font);
     }
+    draw_keyboard_focus(draw);
 }
 
 pub fn draw_choice(draw: &DRAWITEMSTRUCT, colors: Palette, font: HFONT, selected: bool) {
@@ -336,6 +353,7 @@ pub fn draw_choice(draw: &DRAWITEMSTRUCT, colors: Palette, font: HFONT, selected
         );
         SelectObject(draw.hDC, old_font);
     }
+    draw_keyboard_focus(draw);
 }
 
 pub fn measure_popup_menu_item(owner: HWND, measure: &mut MEASUREITEMSTRUCT, font: HFONT) -> bool {

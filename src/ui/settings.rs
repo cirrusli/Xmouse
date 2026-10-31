@@ -10,7 +10,9 @@ use windows_sys::Win32::{
         CreatePen, CreateSolidBrush, DT_CENTER, DT_LEFT, DT_SINGLELINE, DT_VCENTER, DeleteObject,
         DrawTextW, HFONT, PS_SOLID, RoundRect, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
     },
-    UI::WindowsAndMessaging::{BS_OWNERDRAW, WS_CHILD, WS_TABSTOP, WS_VISIBLE},
+    UI::WindowsAndMessaging::{
+        BS_CHECKBOX, BS_OWNERDRAW, BS_RADIOBUTTON, WS_CHILD, WS_GROUP, WS_TABSTOP, WS_VISIBLE,
+    },
 };
 
 pub const IDC_ENABLED: i32 = 1001;
@@ -41,6 +43,8 @@ pub const IDC_NAV_STATISTICS: i32 = 1045;
 pub const IDC_STATS_DAY: i32 = 1046;
 pub const IDC_STATS_MONTH: i32 = 1047;
 pub const IDC_STATS_YEAR: i32 = 1048;
+pub const IDC_STATS_LIST: i32 = 1049;
+pub const IDC_CLOSE_RULE: i32 = 1050;
 
 const SS_RIGHT_STYLE: u32 = 2;
 
@@ -79,6 +83,7 @@ pub struct Controls {
     pub disable_fullscreen_gestures: HWND,
     pub gesture_guard_target: HWND,
     pub gesture_guard_summary: HWND,
+    pub close_rule: HWND,
     pub trigger_right: HWND,
     pub trigger_x1: HWND,
     pub trigger_x2: HWND,
@@ -95,6 +100,11 @@ pub struct Controls {
     pub stats_day: HWND,
     pub stats_month: HWND,
     pub stats_year: HWND,
+    pub stats_list: HWND,
+    pub stats_recognized: HWND,
+    pub stats_success: HWND,
+    pub stats_incomplete: HWND,
+    pub stats_details: HWND,
     pub gesture: gesture_settings::Controls,
     pub open_github: HWND,
     pub general_page: Vec<HWND>,
@@ -125,6 +135,7 @@ impl Default for Controls {
             disable_fullscreen_gestures: ptr::null_mut(),
             gesture_guard_target: ptr::null_mut(),
             gesture_guard_summary: ptr::null_mut(),
+            close_rule: ptr::null_mut(),
             trigger_right: ptr::null_mut(),
             trigger_x1: ptr::null_mut(),
             trigger_x2: ptr::null_mut(),
@@ -141,6 +152,11 @@ impl Default for Controls {
             stats_day: ptr::null_mut(),
             stats_month: ptr::null_mut(),
             stats_year: ptr::null_mut(),
+            stats_list: ptr::null_mut(),
+            stats_recognized: ptr::null_mut(),
+            stats_success: ptr::null_mut(),
+            stats_incomplete: ptr::null_mut(),
+            stats_details: ptr::null_mut(),
             gesture: gesture_settings::Controls::default(),
             open_github: ptr::null_mut(),
             general_page: Vec::new(),
@@ -263,7 +279,7 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
     controls.enabled = builder.control(
         "BUTTON",
         "启用鼠标手势",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_CHECKBOX as u32,
         0,
         232,
         150,
@@ -275,7 +291,7 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
     controls.autostart = builder.control(
         "BUTTON",
         "开机管理员启动",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_CHECKBOX as u32,
         0,
         530,
         150,
@@ -287,7 +303,7 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
     controls.dark_mode = builder.control(
         "BUTTON",
         "深色模式",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_CHECKBOX as u32,
         0,
         232,
         194,
@@ -302,7 +318,7 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
     controls.trigger_right = builder.control(
         "BUTTON",
         "鼠标右键",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_GROUP | BS_RADIOBUTTON as u32,
         0,
         232,
         314,
@@ -314,7 +330,7 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
     controls.trigger_x1 = builder.control(
         "BUTTON",
         "侧键 X1",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_RADIOBUTTON as u32,
         0,
         354,
         314,
@@ -326,7 +342,7 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
     controls.trigger_x2 = builder.control(
         "BUTTON",
         "侧键 X2",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_RADIOBUTTON as u32,
         0,
         476,
         314,
@@ -377,7 +393,7 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
     controls.capture = builder.control(
         "BUTTON",
         "记录文本和图片",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_CHECKBOX as u32,
         0,
         232,
         150,
@@ -389,7 +405,7 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
     controls.encrypt_content = builder.control(
         "BUTTON",
         "本机加密",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_CHECKBOX as u32,
         0,
         530,
         150,
@@ -401,7 +417,7 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
     controls.history_auto_paste = builder.control(
         "BUTTON",
         "选择后自动粘贴",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_CHECKBOX as u32,
         0,
         232,
         194,
@@ -461,7 +477,7 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
     controls.disable_fullscreen_gestures = builder.control(
         "BUTTON",
         "所有全屏窗口暂停手势",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_CHECKBOX as u32,
         0,
         232,
         154,
@@ -503,18 +519,23 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
     applications_page.push(remove_application);
     controls.gesture_guard_summary = builder.label("尚未指定应用", 232, 448, 580, 74);
     applications_page.push(controls.gesture_guard_summary);
-    applications_page.push(builder.label(
-        "先切换到目标窗口，再从托盘打开 Xmouse 设置",
+    controls.close_rule = builder.control(
+        "BUTTON",
+        "L 关闭规则：自动兼容 ▾",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        0,
         232,
-        546,
-        520,
-        22,
-    ));
+        536,
+        590,
+        38,
+        IDC_CLOSE_RULE,
+    );
+    applications_page.push(controls.close_rule);
 
     controls.stats_day = builder.control(
         "BUTTON",
         "今日",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_GROUP | BS_RADIOBUTTON as u32,
         0,
         232,
         116,
@@ -526,7 +547,7 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
     controls.stats_month = builder.control(
         "BUTTON",
         "本月",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_RADIOBUTTON as u32,
         0,
         348,
         116,
@@ -538,7 +559,7 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
     controls.stats_year = builder.control(
         "BUTTON",
         "今年",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_RADIOBUTTON as u32,
         0,
         464,
         116,
@@ -547,6 +568,50 @@ pub fn create_controls(hwnd: HWND, fonts: Fonts) -> Controls {
         IDC_STATS_YEAR,
     );
     statistics_page.push(controls.stats_year);
+
+    for (title, x) in [("已识别", 238), ("调用成功", 446), ("未完成绘制", 650)] {
+        statistics_page.push(builder.label(title, x, 194, 190, 24));
+    }
+    controls.stats_recognized = builder.label("0", 238, 221, 170, 40);
+    controls.stats_success = builder.label("0", 446, 221, 170, 40);
+    controls.stats_incomplete = builder.label("0", 650, 221, 170, 40);
+    for control in [
+        controls.stats_recognized,
+        controls.stats_success,
+        controls.stats_incomplete,
+    ] {
+        set_control_font(control, fonts.title);
+        statistics_page.push(control);
+    }
+    statistics_page.push(builder.label("使用频率排行", 238, 310, 260, 28));
+    controls.stats_details = builder.label("", 554, 311, 275, 28);
+    statistics_page.push(controls.stats_details);
+    controls.stats_list = builder.control(
+        "LISTBOX",
+        "",
+        WS_CHILD
+            | WS_VISIBLE
+            | WS_TABSTOP
+            | windows_sys::Win32::UI::WindowsAndMessaging::WS_VSCROLL
+            | windows_sys::Win32::UI::WindowsAndMessaging::LBS_HASSTRINGS as u32
+            | windows_sys::Win32::UI::WindowsAndMessaging::LBS_OWNERDRAWFIXED as u32,
+        0,
+        232,
+        348,
+        600,
+        268,
+        IDC_STATS_LIST,
+    );
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::SendMessageW(
+            controls.stats_list,
+            windows_sys::Win32::UI::WindowsAndMessaging::LB_SETITEMHEIGHT,
+            0,
+            29,
+        );
+    }
+    super::native::set_accessible_name(controls.stats_list, "手势使用频率排行");
+    statistics_page.push(controls.stats_list);
 
     let cpu_title = builder.label("CPU", 232, 124, 120, 24);
     resources_page.push(cpu_title);

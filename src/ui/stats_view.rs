@@ -1,207 +1,95 @@
+use super::theme::{ACCENT_COLOR, Palette};
 use crate::stats::Snapshot;
-use std::ffi::c_void;
 use windows_sys::Win32::{
     Foundation::RECT,
     Graphics::Gdi::{
-        CreateSolidBrush, DT_LEFT, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW,
-        FillRect, HFONT, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+        CreateSolidBrush, DT_LEFT, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DeleteObject,
+        DrawFocusRect, DrawTextW, FillRect, HFONT, SelectObject, SetBkMode, SetTextColor,
+        TRANSPARENT,
     },
+    UI::Controls::{DRAWITEMSTRUCT, ODS_FOCUS, ODS_SELECTED},
 };
 
-use super::theme::{ACCENT_COLOR, Palette};
-
-pub fn draw(hdc: *mut c_void, colors: Palette, body: HFONT, title: HFONT, snapshot: &Snapshot) {
-    unsafe {
-        SetBkMode(hdc, TRANSPARENT as i32);
-    }
-    draw_text(hdc, body, colors.muted, "已识别", 238, 194, 170, 24, false);
-    draw_text(
-        hdc,
-        title,
-        colors.text,
-        &recognized_count(snapshot).to_string(),
-        238,
-        221,
-        170,
-        40,
-        false,
-    );
-    draw_text(
-        hdc,
-        body,
-        colors.muted,
-        "调用成功",
-        446,
-        194,
-        170,
-        24,
-        false,
-    );
-    draw_text(
-        hdc,
-        title,
-        colors.text,
-        &snapshot.successes.to_string(),
-        446,
-        221,
-        170,
-        40,
-        false,
-    );
-    draw_text(
-        hdc,
-        body,
-        colors.muted,
-        "未完成绘制",
-        650,
-        194,
-        190,
-        24,
-        false,
-    );
-    draw_text(
-        hdc,
-        title,
-        colors.text,
-        &(snapshot.unrecognized + snapshot.cancelled + snapshot.too_short).to_string(),
-        650,
-        221,
-        170,
-        40,
-        false,
-    );
-    draw_text(
-        hdc,
-        body,
-        colors.text,
-        "使用频率排行",
-        238,
-        310,
-        260,
-        28,
-        false,
-    );
-    draw_text(
-        hdc,
-        body,
-        colors.muted,
-        &format!(
-            "绘制 {} · 失败 {} · 禁用 {}",
-            snapshot.attempts, snapshot.failures, snapshot.disabled
-        ),
-        554,
-        311,
-        270,
-        28,
-        true,
-    );
-    if snapshot.ranking.is_empty() {
-        draw_text(
-            hdc,
-            body,
-            colors.muted,
-            "当前时段还没有手势记录",
-            238,
-            410,
-            560,
-            36,
-            false,
-        );
+pub fn draw_rank(draw: &DRAWITEMSTRUCT, colors: Palette, font: HFONT, snapshot: &Snapshot) {
+    let Some(rank) = snapshot.ranking.get(draw.itemID as usize) else {
         return;
-    }
-    let max_count = snapshot.ranking[0].count.max(1);
-    for (index, rank) in snapshot.ranking.iter().take(9).enumerate() {
-        let y = 354 + index as i32 * 29;
-        draw_text(
-            hdc,
-            body,
-            colors.muted,
-            &format!("{:02}", index + 1),
-            238,
-            y,
-            35,
-            24,
-            false,
-        );
-        draw_text(
-            hdc,
-            body,
-            colors.text,
-            rank.gesture.short_label(),
-            278,
-            y,
-            105,
-            24,
-            false,
-        );
-        let background = RECT {
-            left: 390,
-            top: y + 8,
-            right: 728,
-            bottom: y + 17,
-        };
-        fill_rect(hdc, &background, colors.hover);
-        let fill = RECT {
-            right: background.left
-                + ((background.right - background.left) as u64 * rank.count / max_count) as i32,
-            ..background
-        };
-        fill_rect(hdc, &fill, ACCENT_COLOR);
-        draw_text(
-            hdc,
-            body,
-            colors.text,
-            &rank.count.to_string(),
-            744,
-            y,
-            80,
-            24,
-            true,
-        );
-    }
-}
-
-fn recognized_count(snapshot: &Snapshot) -> u64 {
-    snapshot.ranking.iter().map(|rank| rank.count).sum()
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_text(
-    hdc: *mut c_void,
-    font: HFONT,
-    color: u32,
-    value: &str,
-    left: i32,
-    top: i32,
-    width: i32,
-    height: i32,
-    right_aligned: bool,
-) {
-    let mut rect = RECT {
-        left,
-        top,
-        right: left + width,
-        bottom: top + height,
     };
-    let text = value.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
-    let old_font = unsafe { SelectObject(hdc, font) };
+    let background = if draw.itemState & ODS_SELECTED != 0 {
+        colors.selected
+    } else {
+        colors.card
+    };
+    let brush = unsafe { CreateSolidBrush(background) };
     unsafe {
-        SetTextColor(hdc, color);
+        FillRect(draw.hDC, &draw.rcItem, brush);
+        DeleteObject(brush);
+        SetBkMode(draw.hDC, TRANSPARENT as i32);
+        SetTextColor(draw.hDC, colors.text);
+    }
+    let old = unsafe { SelectObject(draw.hDC, font) };
+    let mut label = RECT {
+        left: draw.rcItem.left + 10,
+        top: draw.rcItem.top,
+        right: draw.rcItem.left + 152,
+        bottom: draw.rcItem.bottom,
+    };
+    let text = format!("{:02}  {}", draw.itemID + 1, rank.gesture.short_label());
+    let text: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+    unsafe {
         DrawTextW(
-            hdc,
+            draw.hDC,
             text.as_ptr(),
             -1,
-            &mut rect,
-            DT_VCENTER | DT_SINGLELINE | if right_aligned { DT_RIGHT } else { DT_LEFT },
+            &mut label,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         );
-        SelectObject(hdc, old_font);
     }
-}
-
-fn fill_rect(hdc: *mut c_void, rect: &RECT, color: u32) {
-    let brush = unsafe { CreateSolidBrush(color) };
+    let max = snapshot
+        .ranking
+        .first()
+        .map(|item| item.count)
+        .unwrap_or(1)
+        .max(1);
+    let bar = RECT {
+        left: label.right + 6,
+        right: draw.rcItem.right - 85,
+        top: draw.rcItem.top + 10,
+        bottom: draw.rcItem.bottom - 10,
+    };
+    let track = unsafe { CreateSolidBrush(colors.hover) };
+    let fill = unsafe { CreateSolidBrush(ACCENT_COLOR) };
+    let filled = RECT {
+        right: bar.left + ((bar.right - bar.left).max(0) as u64 * rank.count / max) as i32,
+        ..bar
+    };
     unsafe {
-        FillRect(hdc, rect, brush);
-        DeleteObject(brush);
+        FillRect(draw.hDC, &bar, track);
+        FillRect(draw.hDC, &filled, fill);
+        DeleteObject(track);
+        DeleteObject(fill);
+    }
+    let mut count = RECT {
+        left: bar.right + 8,
+        right: draw.rcItem.right - 12,
+        ..label
+    };
+    let text: Vec<u16> = rank
+        .count
+        .to_string()
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    unsafe {
+        DrawTextW(
+            draw.hDC,
+            text.as_ptr(),
+            -1,
+            &mut count,
+            DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+        );
+        SelectObject(draw.hDC, old);
+        if draw.itemState & ODS_FOCUS != 0 {
+            DrawFocusRect(draw.hDC, &draw.rcItem);
+        }
     }
 }

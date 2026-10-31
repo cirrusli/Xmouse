@@ -2,7 +2,7 @@
 
 Xmouse 是面向 Windows 10/11 x64 的轻量鼠标手势与剪贴板历史工具。它使用 Rust 和原生 Win32 API，不包含 WebView 或托管 UI 运行时。
 
-当前版本：**0.15.2**
+当前版本：**0.16.0**
 
 作者：[cirrusli](https://github.com/cirrusli) · 项目地址：[github.com/cirrusli/Xmouse](https://github.com/cirrusli/Xmouse)
 
@@ -10,7 +10,7 @@ Xmouse 是面向 Windows 10/11 x64 的轻量鼠标手势与剪贴板历史工具
 
 双击根目录的 `启动 Xmouse.cmd`。脚本会从 `latest\Xmouse.exe` 启动当前最新版。
 
-便携版也可以直接解压 `outputs\Xmouse-0.15.2-windows-x64.zip` 后运行 `Xmouse.exe`。请保留 `sqlite3.dll` 与程序在同一目录。
+便携版也可以直接解压 `outputs\Xmouse-0.16.0-windows-x64.zip` 后运行 `Xmouse.exe`。SQLite 已静态链接，单独移动 EXE 也可运行，无需附带 DLL。
 
 ## 目录结构
 
@@ -32,7 +32,7 @@ Xmouse 是面向 Windows 10/11 x64 的轻量鼠标手势与剪贴板历史工具
 - 工程架构与模块边界：`docs\ARCHITECTURE.md`
 - 代码现状、性能瓶颈和下一阶段优先级：`docs\CURRENT-STATE-AND-ROADMAP.md`
 - 持续回归清单与变更影响映射：`docs\REGRESSION-TEST-PLAN.md`
-- 当前版本说明：`docs\RELEASE-NOTES-0.15.2.md`
+- 当前版本说明：`docs\RELEASE-NOTES-0.16.0.md`
 - 外部评审与迭代验收：`docs\TECHNICAL-REVIEW-2026-10-31.md`
 - 完整版本历史：`CHANGELOG.md`
 
@@ -54,11 +54,14 @@ Xmouse 是面向 Windows 10/11 x64 的轻量鼠标手势与剪贴板历史工具
 
 “应用保护”页支持两层规则：默认对覆盖整块显示器的全屏窗口暂停手势，也可以把最近活跃窗口对应的 EXE 加入禁用名单。关闭全屏总开关后可只保护指定游戏；规则命中时 Xmouse 完全放行原始鼠标输入。
 
+该页还可为当前应用设置 L 关闭规则：自动兼容、发送 Ctrl+W、关闭当前窗口。修改后保存生效；选择“自动兼容”可移除自定义规则。窗口关闭使用标准 `WM_CLOSE`，由应用决定关闭、询问保存或收回托盘，不强杀进程。
+
 提升权限或受保护的窗口仍受 Windows UIPI 限制。启用“开机管理员启动”后，Xmouse 会在当前用户登录时通过最高权限计划任务启动，可改善对普通管理员窗口的兼容性；反作弊保护进程和 UAC 安全桌面仍不保证可用。把应用加入禁用名单可以确保这些窗口中的鼠标不被 Xmouse 拦截。
 
 ## 界面
 
 - 设置页和剪贴板历史支持浅色、深色模式同步切换。
+- 设置/历史支持 Tab、Shift+Tab、空格、Enter 与 Esc；焦点框可见。分段选项使用方向键切换，统计排行可聚焦并逐行浏览；开关和选项保留原生 checkbox/radio 状态。
 - 常用设置只保留启用状态、开机管理员启动、触发键、历史记录和本机加密；首次启用管理员启动时会显示一次 UAC，后续登录不再确认。
 - “资源占用”页显示当前进程的 CPU、GPU、私有内存、工作集、句柄和运行时间。
 - “手势统计”页展示今日、本月、今年的使用频率排行；绘制结果保存在本机 `gesture-stats.db`，每次绘制对应一条不含轨迹坐标的摘要日志。
@@ -94,15 +97,18 @@ Edge 内置手势与 Xmouse 都会使用“按住右键并拖动”，不建议�
 
 ## 构建
 
-需要 Rust stable x64 工具链、Windows 资源编译器和 SQLite 3。执行：
+需要 Rust stable x64 工具链、Windows 资源编译器和 C 编译器（推荐 MSVC Build Tools）。SQLite 源码随依赖编译，不需要系统安装 SQLite。执行：
 
 ```powershell
 cargo test
 cargo build --release
+./scripts/verify-portable.ps1
 ```
 
 每次变更建议运行 `scripts\quality.ps1`；剪贴板相关变更运行 `scripts\quality.ps1 -ClipboardRoundTrip`。GitHub Actions 还会检查测试数量、Clippy、Release 测试并生成覆盖率报告。完整必测项见 `docs\REGRESSION-TEST-PLAN.md`。
 
-Release 可执行文件位于 `target\release\xmouse.exe`。当前版本说明见 `docs\RELEASE-NOTES-0.15.2.md`，完整变更历史见 `CHANGELOG.md`。
+提交源码并通过质量检查后，运行 `scripts\package.ps1` 在 `work` 下生成单 EXE 便携包、对应 HEAD 的源码包及 SHA-256 清单；脚本不覆盖正在运行的版本。归档旧包后再更新 `latest` 和 `outputs`。
+
+Release 可执行文件位于 `target\release\xmouse.exe`。`--self-test` 在加载用户数据、窗口和钩子之前完成内存数据库读写与完整性自检；发布检查还会验证 PE 导入并在独立中文/空格目录中运行单 EXE。当前版本说明见 `docs\RELEASE-NOTES-0.16.0.md`，完整变更历史见 `CHANGELOG.md`。
 
 首次启动会打开设置页并创建托盘图标。关闭设置页只会隐藏窗口；需要从托盘菜单选择“退出 Xmouse”结束进程。

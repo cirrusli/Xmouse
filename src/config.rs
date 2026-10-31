@@ -1,6 +1,7 @@
 use crate::{
     action::ActionKind,
     gesture::{GestureId, UserGestureTemplate},
+    window_rules::{self, CloseRule},
 };
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -119,6 +120,7 @@ pub struct AppConfig {
     pub custom_gestures: Vec<UserGestureTemplate>,
     pub gesture_bindings: Vec<GestureBinding>,
     pub gesture_guard: GestureGuardConfig,
+    pub close_rules: Vec<CloseRule>,
     pub history: HistoryConfig,
 }
 
@@ -139,6 +141,7 @@ impl Default for AppConfig {
             custom_gestures: Vec::new(),
             gesture_bindings: default_gesture_bindings(),
             gesture_guard: GestureGuardConfig::default(),
+            close_rules: Vec::new(),
             history: HistoryConfig::default(),
         }
     }
@@ -146,6 +149,7 @@ impl Default for AppConfig {
 
 impl AppConfig {
     pub fn validate(&self) -> Result<()> {
+        window_rules::validate(&self.close_rules)?;
         if self.schema_version != CURRENT_SCHEMA_VERSION {
             bail!("不支持的配置版本 {}", self.schema_version);
         }
@@ -391,6 +395,32 @@ mod tests {
         assert_eq!(config.action_for(GestureId::Seven), ActionKind::TaskManager);
         assert_eq!(config.action_for(GestureId::Circle), ActionKind::ScreenSnip);
         config.validate().expect("default remains valid");
+    }
+
+    #[test]
+    fn close_rules_are_optional_and_round_trip_without_changing_other_settings() {
+        let legacy: AppConfig =
+            serde_json::from_str(r#"{"schema_version":2,"dark_mode":true}"#).unwrap();
+        assert!(legacy.close_rules.is_empty());
+        let mut config = legacy;
+        window_rules::set_override(
+            &mut config.close_rules,
+            "EDITOR.exe",
+            Some(crate::window_rules::CloseMethod::Window),
+        )
+        .unwrap();
+        config.validate().unwrap();
+        let restored: AppConfig =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert!(restored.dark_mode);
+        assert_eq!(restored.close_rules, config.close_rules);
+        assert_eq!(restored.gesture_bindings, config.gesture_bindings);
+        assert!(
+            serde_json::from_str::<AppConfig>(
+                r#"{"close_rules":[{"process":"editor.exe","method":"kill_process"}]}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]

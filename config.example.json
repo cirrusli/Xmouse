@@ -10,6 +10,7 @@
   "show_trail": true,
   "search_url_template": "https://www.google.com/search?q={query}",
   "autostart": false,
+  "close_rules": [],
   "custom_gestures": [],
   "gesture_bindings": [
     { "gesture": "up", "action": "toggle_topmost" },

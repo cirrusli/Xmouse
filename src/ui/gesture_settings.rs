@@ -3,7 +3,9 @@ use std::ptr;
 use windows_sys::Win32::{
     Foundation::HWND,
     Graphics::Gdi::HFONT,
-    UI::WindowsAndMessaging::{BS_OWNERDRAW, WS_CHILD, WS_TABSTOP, WS_VISIBLE},
+    UI::WindowsAndMessaging::{
+        BS_OWNERDRAW, BS_RADIOBUTTON, WS_CHILD, WS_GROUP, WS_TABSTOP, WS_VISIBLE,
+    },
 };
 
 pub const IDC_GESTURE_UP: i32 = 1027;
@@ -79,7 +81,7 @@ pub fn create_controls(hwnd: HWND, body_font: HFONT, section_font: HFONT) -> Con
     let binding = builder.control(
         "BUTTON",
         "执行动作",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_GROUP | BS_OWNERDRAW as u32,
         0,
         232,
         282,
@@ -122,7 +124,11 @@ fn choice(builder: &ControlFactory, text: &str, x: i32, y: i32, id: i32) -> HWND
     builder.control(
         "BUTTON",
         text,
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
+        WS_CHILD
+            | WS_VISIBLE
+            | WS_TABSTOP
+            | BS_RADIOBUTTON as u32
+            | if id == IDC_GESTURE_UP { WS_GROUP } else { 0 },
         0,
         x,
         y,

@@ -12,11 +12,20 @@ mod hook;
 mod logging;
 mod raw_mouse;
 mod resources;
+mod self_test;
 mod stats;
 mod storage;
 mod ui;
+mod window_rules;
 
 fn main() {
+    if std::env::args_os().any(|argument| argument == "--self-test") {
+        if let Err(error) = self_test::run() {
+            eprintln!("Xmouse self-test failed: {error:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Some(result) = autostart::handle_helper_command() {
         if let Err(error) = result {
             autostart::record_helper_error(&format!("{error:#}"));

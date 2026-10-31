@@ -6,5 +6,6 @@ pub mod history_preview;
 pub mod history_view;
 pub mod native;
 pub mod settings;
+pub mod stats_view;
 pub mod theme;
 pub mod widgets;

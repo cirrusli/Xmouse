@@ -26,6 +26,11 @@ if ((Test-Path -LiteralPath $workspaceCargo) -and $cargo -eq $workspaceCargo) {
 if (Test-Path -LiteralPath (Join-Path $projectRoot 'work/sqlite')) {
     $env:LIBRARY_PATH = Join-Path $projectRoot 'work/sqlite'
 }
+$llvmMingw = Join-Path $projectRoot 'work/llvm-mingw-20261020-ucrt-x86_64/bin'
+if (Test-Path -LiteralPath (Join-Path $llvmMingw 'clang.exe')) {
+    $env:CC_x86_64_pc_windows_gnu = Join-Path $llvmMingw 'clang.exe'
+    $env:AR_x86_64_pc_windows_gnu = Join-Path $llvmMingw 'llvm-ar.exe'
+}
 $localPaths = @(
     (Join-Path $projectRoot 'work/cargo-install-home/bin'),
     (Join-Path $projectRoot 'work/cargo/bin'),
@@ -52,6 +57,13 @@ try {
         & $cargo test --release materialized_snapshot_round_trips_text_and_custom_formats -- --ignored
         if ($LASTEXITCODE -ne 0) { throw 'Interactive clipboard round-trip test failed.' }
     }
+
+    # Tests produce a separate harness binary. Build the shipping executable
+    # explicitly so target/release/xmouse.exe can never remain stale.
+    & $cargo build --release
+    if ($LASTEXITCODE -ne 0) { throw 'cargo build --release failed.' }
+
+    & (Join-Path $PSScriptRoot 'verify-portable.ps1')
 
     if ($Coverage) {
         & $cargo llvm-cov --summary-only --fail-under-lines 24

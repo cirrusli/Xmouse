@@ -5,10 +5,11 @@
 当前本地内容应包括：
 
 - `Xmouse.exe`
-- `sqlite3.dll`
 - `config.example.json`
 - `RELEASE-NOTES.md`
 - `LICENSE`
 - `THIRD-PARTY-NOTICES.md`
 
 除本说明外，目录内容属于本地构建/交付物，不提交到 Git。
+
+0.16.0 起 SQLite 静态链接进 EXE。单独移动 `Xmouse.exe` 也可启动，无需附带数据库 DLL；用户数据仍保存在 `%LOCALAPPDATA%\Xmouse`。

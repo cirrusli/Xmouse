@@ -1,6 +1,7 @@
 use crate::{
     action::ActionKind,
     gesture::{GestureId, UserGestureTemplate},
+    window_rules::{self, CloseRule},
 };
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -80,6 +81,28 @@ impl Default for GestureGuardConfig {
     }
 }
 
+impl GestureGuardConfig {
+    pub fn add_excluded_process(&mut self, process_name: &str) -> bool {
+        let process_name = process_name.trim();
+        if process_name.is_empty()
+            || self
+                .excluded_processes
+                .iter()
+                .any(|item| item.eq_ignore_ascii_case(process_name))
+        {
+            return false;
+        }
+        self.excluded_processes.push(process_name.to_owned());
+        self.excluded_processes
+            .sort_by_key(|item| item.to_lowercase());
+        true
+    }
+
+    pub fn remove_excluded_process(&mut self, index: usize) -> Option<String> {
+        (index < self.excluded_processes.len()).then(|| self.excluded_processes.remove(index))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -97,6 +120,7 @@ pub struct AppConfig {
     pub custom_gestures: Vec<UserGestureTemplate>,
     pub gesture_bindings: Vec<GestureBinding>,
     pub gesture_guard: GestureGuardConfig,
+    pub close_rules: Vec<CloseRule>,
     pub history: HistoryConfig,
 }
 
@@ -117,6 +141,7 @@ impl Default for AppConfig {
             custom_gestures: Vec::new(),
             gesture_bindings: default_gesture_bindings(),
             gesture_guard: GestureGuardConfig::default(),
+            close_rules: Vec::new(),
             history: HistoryConfig::default(),
         }
     }
@@ -124,6 +149,7 @@ impl Default for AppConfig {
 
 impl AppConfig {
     pub fn validate(&self) -> Result<()> {
+        window_rules::validate(&self.close_rules)?;
         if self.schema_version != CURRENT_SCHEMA_VERSION {
             bail!("不支持的配置版本 {}", self.schema_version);
         }
@@ -372,6 +398,32 @@ mod tests {
     }
 
     #[test]
+    fn close_rules_are_optional_and_round_trip_without_changing_other_settings() {
+        let legacy: AppConfig =
+            serde_json::from_str(r#"{"schema_version":2,"dark_mode":true}"#).unwrap();
+        assert!(legacy.close_rules.is_empty());
+        let mut config = legacy;
+        window_rules::set_override(
+            &mut config.close_rules,
+            "EDITOR.exe",
+            Some(crate::window_rules::CloseMethod::Window),
+        )
+        .unwrap();
+        config.validate().unwrap();
+        let restored: AppConfig =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert!(restored.dark_mode);
+        assert_eq!(restored.close_rules, config.close_rules);
+        assert_eq!(restored.gesture_bindings, config.gesture_bindings);
+        assert!(
+            serde_json::from_str::<AppConfig>(
+                r#"{"close_rules":[{"process":"editor.exe","method":"kill_process"}]}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn gesture_and_clipboard_exclusions_are_independent() {
         let config: AppConfig = serde_json::from_str(
             r#"{
@@ -383,6 +435,30 @@ mod tests {
 
         assert_eq!(config.gesture_guard.excluded_processes, ["game.exe"]);
         assert_eq!(config.history.excluded_processes, ["password-manager.exe"]);
+    }
+
+    #[test]
+    fn gesture_exclusions_are_case_insensitive_and_sorted() {
+        let mut guard = GestureGuardConfig::default();
+        assert!(guard.add_excluded_process("VALORANT.exe"));
+        assert!(guard.add_excluded_process("GTA5.exe"));
+        assert!(!guard.add_excluded_process("valorant.EXE"));
+        assert!(!guard.add_excluded_process("  "));
+        assert_eq!(guard.excluded_processes, ["GTA5.exe", "VALORANT.exe"]);
+    }
+
+    #[test]
+    fn gesture_exclusions_can_be_removed_by_menu_index() {
+        let mut guard = GestureGuardConfig {
+            excluded_processes: vec!["game-a.exe".to_owned(), "game-b.exe".to_owned()],
+            ..GestureGuardConfig::default()
+        };
+        assert_eq!(
+            guard.remove_excluded_process(0).as_deref(),
+            Some("game-a.exe")
+        );
+        assert_eq!(guard.excluded_processes, ["game-b.exe"]);
+        assert_eq!(guard.remove_excluded_process(8), None);
     }
 
     #[test]

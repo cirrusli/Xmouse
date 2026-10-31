@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -37,16 +38,23 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run Clippy
-        run: cargo clippy --release --all-targets --features ci-bundled-sqlite -- -D warnings
+        run: cargo clippy --locked --release --all-targets -- -D warnings
 
       - name: Run release tests
-        run: cargo test --release --features ci-bundled-sqlite
+        run: cargo test --locked --release
+
+      - name: Verify standalone release executable
+        shell: pwsh
+        run: |
+          cargo build --locked --release
+          if ($LASTEXITCODE -ne 0) { throw 'Release build failed' }
+          ./scripts/verify-portable.ps1
 
       - name: Install coverage tool
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Generate coverage report
-        run: cargo llvm-cov --features ci-bundled-sqlite --lcov --output-path coverage.lcov --fail-under-lines 24
+        run: cargo llvm-cov --lcov --output-path coverage.lcov --fail-under-lines 24
 
       - name: Publish coverage summary
         shell: pwsh

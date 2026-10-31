@@ -40,6 +40,8 @@ flowchart LR
 | `actions.rs` | 轨迹绑定解析后的目标验证与动作执行 | 手势形状识别和任意脚本 |
 | `autostart.rs` | 提权助手、最高权限登录任务和旧启动项迁移 | UI 状态、手势与剪贴板业务 |
 | `stats.rs` | 手势事件存储、日/月/年聚合和排行 | 鼠标坐标、剪贴板正文和 UI 绘制 |
+| `gesture_lifecycle.rs` | 手势结束宽限、最长存活时间和轨迹消息会话隔离 | Win32 调用、动作执行 |
+| `raw_mouse.rs` | 原始鼠标释放信号与逻辑触发键映射 | 轨迹采样、鼠标拦截和持久化 |
 | `ui/stats_view.rs` | 统计页数值、排行条形图绘制 | 数据库查询和事件写入 |
 
 依赖方向保持为 `app → ui/domain services`。纯绘制函数通过参数接收主题、字体和视图数据，不读取 `AppState`；这样可以独立调整页面而不影响钩子与存储线程。
@@ -68,6 +70,8 @@ flowchart LR
 管理员自启不使用 `requireAdministrator` 应用清单。设置保存时，`app.rs` 仅在开关变化或计划任务缺失时调用 `autostart.rs`；后者通过 Shell `runas` 启动同一可执行文件的一次性助手，并在单实例检查前处理内部参数。助手生成 UTF-16 任务 XML，再使用 `schtasks.exe` 创建当前用户 `ONLOGON + HIGHEST + InteractiveToken` 任务，动作固定为当前便携版路径和 `--startup`；XML 同时明确允许电池供电启动/运行并忽略重复实例。父进程等待助手退出，UAC 取消或任务失败时不保存新设置。正常启动只查询任务是否存在，不自动弹出 UAC；升级成功后清理旧版 `HKCU Run` 值。
 
 ## 持续质量边界
+
+0.15.1 起每笔手势使用独立编号；开始、采样和结束的 `WM_APP` 消息均携带编号，UI 拒绝旧会话。原始鼠标输入提供独立的按钮释放信号，校验按下时间戳后标记当前会话。钩子线程与 UI 线程只在手势期间启动 100 ms 看门狗：释放信号后保留 150 ms 宽限，最长 15 秒取消。正常结束或恢复均停用计时器；恢复会同时清除候选与原子门控，并重新安装钩子。低级回调发生锁竞争时设置延迟清理请求，不再单独清除门控；所有恢复日志由动作线程写入。
 
 `docs/REGRESSION-TEST-PLAN.md` 是用户可见行为的稳定索引。每个修复或新功能先选择回归编号，再决定自动化或真实 Windows 验证；`scripts/verify-test-baseline.ps1` 防止测试数量静默减少，`scripts/quality.ps1` 统一格式、Clippy、Release 测试、最终可执行文件构建和可选剪贴板/覆盖率检查。显式构建步骤避免测试 Harness 已更新但交付 EXE 仍陈旧。GitHub Actions 使用 MSVC 和仅限 CI 的 bundled SQLite 特性生成 LCOV，普通便携版仍使用随包分发的 `sqlite3.dll`，不增加应用体积。
 

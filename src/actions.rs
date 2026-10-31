@@ -100,6 +100,26 @@ pub fn run_worker(
                             },
                         );
                     }
+                    HookCommand::Recovered {
+                        sample_count,
+                        was_gesture,
+                        reason,
+                    } => {
+                        logging::info("手势恢复", reason.label());
+                        if was_gesture {
+                            record_gesture(
+                                &stats,
+                                ui_hwnd,
+                                GestureEvent {
+                                    gesture: None,
+                                    action: None,
+                                    outcome: Outcome::Cancelled,
+                                    score: None,
+                                    sample_count,
+                                },
+                            );
+                        }
+                    }
                     HookCommand::Stroke(stroke) => {
                         let (threshold, user_templates) = {
                             let config = config.read().expect("config poisoned");

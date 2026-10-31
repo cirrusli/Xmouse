@@ -5,12 +5,13 @@ use crate::{
     clipboard::{ClipboardService, process_name},
     config::{self, AppConfig, GestureGuardConfig, TriggerButton},
     gesture::{GestureId, GestureMatch, Point as GesturePoint, Recognizer, UserGestureTemplate},
+    gesture_lifecycle::{SessionWatchdog, WATCHDOG_INTERVAL_MS, accepts_overlay_event},
     hook::{
         self, HookCommand, UiPoint, UiStrokeBegin, WM_APP_CAPTURE_DONE, WM_APP_OVERLAY_BEGIN,
         WM_APP_OVERLAY_END, WM_APP_OVERLAY_POINT, WM_APP_SHOW_HISTORY, WM_APP_STATS_UPDATED,
         WM_APP_TOAST, WM_APP_TRAY,
     },
-    logging,
+    logging, raw_mouse,
     resources::{ProcessUsage, UsageSampler},
     stats::{GestureStats, Period as StatsPeriod, Snapshot as StatsSnapshot},
     storage::{ClipKind, ClipPayload, Storage},
@@ -83,23 +84,24 @@ use windows_sys::Win32::{
             AppendMenuW, CW_USEDEFAULT, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
             DestroyMenu, DestroyWindow, DispatchMessageW, EN_CHANGE, FindWindowW, GA_ROOT,
             GW_OWNER, GWLP_USERDATA, GetAncestor, GetClientRect, GetCursorPos, GetDlgItem,
-            GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindow, GetWindowLongPtrW,
-            GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, HMENU,
-            HTTRANSPARENT, HWND_TOPMOST, IDC_ARROW, IDI_APPLICATION, IDYES, IsWindow,
-            IsWindowVisible, KillTimer, LB_ADDSTRING, LB_GETCURSEL, LB_ITEMFROMPOINT,
-            LB_RESETCONTENT, LB_SETCURSEL, LBN_DBLCLK, LBN_SELCHANGE, LWA_ALPHA, LWA_COLORKEY,
-            LoadCursorW, LoadIconW, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK,
-            MB_YESNO, MENUINFO, MENUITEMINFOW, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING,
-            MFT_OWNERDRAW, MIIM_DATA, MIIM_FTYPE, MIM_BACKGROUND, MSG, MessageBoxW,
-            PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SM_CXVIRTUALSCREEN,
-            SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_RESTORE, SW_SHOW,
-            SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SendMessageW, SetForegroundWindow,
-            SetLayeredWindowAttributes, SetMenuInfo, SetMenuItemInfoW, SetTimer, SetWindowLongPtrW,
-            SetWindowPos, SetWindowTextW, ShowWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
-            TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WA_INACTIVE,
-            WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CLIPBOARDUPDATE, WM_CLOSE, WM_COMMAND,
-            WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY,
-            WM_DRAWITEM, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MEASUREITEM,
+            GetForegroundWindow, GetMessageTime, GetMessageW, GetSystemMetrics, GetWindow,
+            GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+            GetWindowThreadProcessId, HMENU, HTTRANSPARENT, HWND_TOPMOST, IDC_ARROW,
+            IDI_APPLICATION, IDYES, IsWindow, IsWindowVisible, KillTimer, LB_ADDSTRING,
+            LB_GETCURSEL, LB_ITEMFROMPOINT, LB_RESETCONTENT, LB_SETCURSEL, LBN_DBLCLK,
+            LBN_SELCHANGE, LWA_ALPHA, LWA_COLORKEY, LoadCursorW, LoadIconW, MB_ICONERROR,
+            MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO, MENUINFO, MENUITEMINFOW,
+            MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MFT_OWNERDRAW, MIIM_DATA, MIIM_FTYPE,
+            MIM_BACKGROUND, MSG, MessageBoxW, PostQuitMessage, RegisterClassExW,
+            RegisterWindowMessageW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+            SM_YVIRTUALSCREEN, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
+            SWP_SHOWWINDOW, SendMessageW, SetForegroundWindow, SetLayeredWindowAttributes,
+            SetMenuInfo, SetMenuItemInfoW, SetTimer, SetWindowLongPtrW, SetWindowPos,
+            SetWindowTextW, ShowWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD,
+            TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WA_INACTIVE, WINDOW_EX_STYLE,
+            WINDOW_STYLE, WM_ACTIVATE, WM_CLIPBOARDUPDATE, WM_CLOSE, WM_COMMAND, WM_CREATE,
+            WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM,
+            WM_ERASEBKGND, WM_INPUT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MEASUREITEM,
             WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_SHOWWINDOW, WM_TIMER,
             WNDCLASSEXW, WS_CAPTION, WS_CLIPCHILDREN, WS_EX_LAYERED, WS_EX_NOACTIVATE,
             WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MINIMIZEBOX, WS_OVERLAPPED,
@@ -125,6 +127,7 @@ const IDM_GESTURE_ACTION_BASE: usize = 4000;
 const IDM_GESTURE_EXCLUSION_BASE: usize = 5000;
 const RESOURCE_TIMER_ID: usize = 2;
 const TRAY_RETRY_TIMER_ID: usize = 3;
+const OVERLAY_WATCHDOG_TIMER_ID: usize = 4;
 const TRAY_RETRY_LIMIT: u8 = 60;
 const TRAY_RETRY_DELAY_MS: u32 = 1_000;
 const WM_APP_HISTORY_PREVIEW_READY: u32 = 0x8008;
@@ -169,6 +172,8 @@ struct AppState {
     capture_sender: Sender<()>,
     controls: Controls,
     overlay_points: Vec<UiPoint>,
+    overlay_session_id: usize,
+    overlay_watchdog: Option<SessionWatchdog>,
     gesture_recognizer: Recognizer,
     gesture_preview: Option<GestureMatch>,
     last_gesture_preview_at: Option<Instant>,
@@ -296,6 +301,8 @@ pub fn run() -> Result<()> {
         capture_sender,
         controls: Controls::default(),
         overlay_points: Vec::with_capacity(512),
+        overlay_session_id: 0,
+        overlay_watchdog: None,
         gesture_recognizer,
         gesture_preview: None,
         last_gesture_preview_at: None,
@@ -789,6 +796,10 @@ unsafe extern "system" fn main_proc(
                 if unsafe { AddClipboardFormatListener(hwnd) } == 0 {
                     post_toast(hwnd as isize, "无法监听剪贴板更新");
                 }
+                match raw_mouse::register(hwnd) {
+                    Ok(()) => logging::info("鼠标释放监听", "原始输入注册成功"),
+                    Err(error) => logging::error("鼠标释放监听", &error),
+                }
                 add_tray_icon(state);
             }
             0
@@ -898,6 +909,10 @@ unsafe extern "system" fn main_proc(
             }
             0
         }
+        WM_INPUT => {
+            raw_mouse::handle_input(lparam, unsafe { GetMessageTime() } as u32);
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+        }
         WM_CLIPBOARDUPDATE => {
             if let Some(state) = state_mut()
                 && !state.clipboard.consume_ignored_update()
@@ -948,10 +963,18 @@ unsafe extern "system" fn main_proc(
                 let pointer = lparam as *mut UiStrokeBegin;
                 if !pointer.is_null() {
                     let begin = unsafe { *Box::from_raw(pointer) };
+                    if wparam == 0 || wparam != hook::active_session_id() {
+                        return 0;
+                    }
+                    state.overlay_session_id = wparam;
+                    state.overlay_watchdog = Some(SessionWatchdog::new(Instant::now()));
                     state.overlay_points.clear();
                     state.overlay_points.extend(begin.points);
                     state.gesture_preview = None;
                     state.last_gesture_preview_at = None;
+                    unsafe {
+                        SetTimer(hwnd, OVERLAY_WATCHDOG_TIMER_ID, WATCHDOG_INTERVAL_MS, None);
+                    }
                     refresh_gesture_preview(state);
                     show_overlay(state);
                 }
@@ -963,6 +986,13 @@ unsafe extern "system" fn main_proc(
                 let pointer = lparam as *mut UiPoint;
                 if !pointer.is_null() {
                     let point = unsafe { *Box::from_raw(pointer) };
+                    if !accepts_overlay_event(
+                        wparam,
+                        state.overlay_session_id,
+                        hook::active_session_id(),
+                    ) {
+                        return 0;
+                    }
                     state.overlay_points.push(point);
                     refresh_gesture_preview(state);
                     unsafe {
@@ -973,7 +1003,9 @@ unsafe extern "system" fn main_proc(
             0
         }
         WM_APP_OVERLAY_END => {
-            if let Some(state) = state_mut() {
+            if let Some(state) = state_mut()
+                && state.overlay_session_id == wparam
+            {
                 hide_overlay(state);
             }
             0
@@ -1122,6 +1154,25 @@ unsafe extern "system" fn main_proc(
         WM_ERASEBKGND => 1,
         WM_PAINT => {
             paint_main_window(hwnd);
+            0
+        }
+        WM_TIMER if wparam == OVERLAY_WATCHDOG_TIMER_ID => {
+            if let Some(state) = state_mut() {
+                let is_current = state.overlay_session_id != 0
+                    && state.overlay_session_id == hook::active_session_id();
+                let expired = state.overlay_watchdog.as_mut().is_some_and(|watchdog| {
+                    watchdog
+                        .poll(
+                            Instant::now(),
+                            hook::session_has_released(state.overlay_session_id),
+                        )
+                        .is_some()
+                });
+                if !is_current || expired {
+                    hook::request_session_cancel(state.overlay_session_id);
+                    hide_overlay(state);
+                }
+            }
             0
         }
         WM_TIMER if wparam == RESOURCE_TIMER_ID => {
@@ -3345,6 +3396,11 @@ fn show_overlay(state: &mut AppState) {
 }
 
 fn hide_overlay(state: &mut AppState) {
+    unsafe {
+        KillTimer(state.main_hwnd, OVERLAY_WATCHDOG_TIMER_ID);
+    }
+    state.overlay_session_id = 0;
+    state.overlay_watchdog = None;
     let was_visible = unsafe { IsWindowVisible(state.overlay_hwnd) } != 0;
     unsafe {
         SetLayeredWindowAttributes(
